@@ -6,13 +6,14 @@
 
 import socket
 from threading import Thread
-from gpiozero import Button
-from signal import pause
+from gpiozero  import Button
+from signal    import pause
+from time      import sleep
 
-TCP_IP = '0.0.0.0'
-TCP_PORT = 31415
+TCP_IP            = '0.0.0.0'
+TCP_PORT          = 31415
 CONNECTIONS_LIMIT = 5
-ENC = 'UTF-8'
+ENC               = 'UTF-8'
 
 buttons_map = [
   (1, 3),
@@ -78,25 +79,40 @@ class BtnsThread(Thread):
 
 class SocketThread(Thread):
   
+  is_dead = False
+  
   def __init__(self, radio, conn, addr):
     self.radio = radio
-    self.conn = conn
-    self.addr = addr
+    self.conn  = conn
+    self.addr  = addr
+    self.radio.on('close connections', self.__del__)
     Thread.__init__(self)
   
   def __del__(self):
+    if self.is_dead: return
+    self.radio.off('close connections', self.__del__)
     self.radio.off('button pressed', self.send_pressed)
     self.radio.off('button released', self.send_released)
     self.conn.close()
     print('Connection lost for:', self.addr)
+    del self.radio
+    del self.conn
+    del self.addr
+    self.is_dead = True
   
   def send_pressed(self, n):
-    conn.send(bytes('button pressed|%d\n' % n, ENC))
-    print('Send about button pressed to', self.addr)
+    try:
+      conn.send(bytes('button pressed|%d\n' % n, ENC))
+      print('Sent about button pressed to', self.addr)
+    except BrokenPipeError:
+      self.__del__()
   
   def send_released(self, n):
-    conn.send(bytes('button released|%d\n' % n, ENC))
-    print('Send about button released to', self.addr)
+    try:
+      conn.send(bytes('button released|%d\n' % n, ENC))
+      print('Sent about button released to', self.addr)
+    except BrokenPipeError:
+      self.__del__()
   
   def run(self):
     print('Address connected:', self.addr)
@@ -112,6 +128,12 @@ s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.bind((TCP_IP, TCP_PORT))
 s.listen(CONNECTIONS_LIMIT)
 
-while True:
-  conn, addr = s.accept()
-  SocketThread(radio, conn, addr).start()
+try:
+  while True:
+    conn, addr = s.accept()
+    SocketThread(radio, conn, addr).start()
+except (KeyboardInterrupt, SystemExit):
+  print('Exiting... Closing all connections...')
+  radio.trigger('close connections')
+  sleep(1)
+  print('Done')
