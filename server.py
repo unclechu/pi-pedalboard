@@ -79,12 +79,13 @@ class BtnsThread(Thread):
 
 class SocketThread(Thread):
   
-  is_dead = False
+  is_dead = True
   
   def __init__(self, radio, conn, addr):
-    self.radio = radio
-    self.conn  = conn
-    self.addr  = addr
+    self.is_dead = False
+    self.radio   = radio
+    self.conn    = conn
+    self.addr    = addr
     self.radio.on('close connections', self.__del__)
     Thread.__init__(self)
   
@@ -98,7 +99,7 @@ class SocketThread(Thread):
     del self.radio
     del self.conn
     del self.addr
-    self.is_dead = True
+    del self.is_dead
   
   def send_pressed(self, n):
     try:
