@@ -2,18 +2,18 @@
 # -*- coding: utf-8 -*-
 
 # FIXME two connections
-# TODO delay before another press
 
 import socket
 from threading import Thread
 from gpiozero  import Button
 from signal    import pause
-from time      import sleep
+from time      import sleep, time
 
 TCP_IP            = '0.0.0.0'
 TCP_PORT          = 31415
 CONNECTIONS_LIMIT = 5
 ENC               = 'UTF-8'
+NEW_PRESS_DELAY   = 0.3 # in seconds
 
 buttons_map = [
   (1, 3),
@@ -56,17 +56,24 @@ class BtnsThread(Thread):
   
   def __init__(self, radio):
     self.radio = radio
+    self.last_press_time = 0
+    self.is_released = True
     Thread.__init__(self)
   
   def pressed(self, n):
     def f():
+      if time() - (self.last_press_time + NEW_PRESS_DELAY) <= 0: return
       print('Pressed button #%d' % n)
+      self.last_press_time = time()
+      self.is_released = False
       self.radio.trigger('button pressed', n=n)
     return f
   
   def released(self, n):
     def f():
+      if self.is_released: return
       print('Released button #%d' % n)
+      self.is_released = True
       self.radio.trigger('button released', n=n)
     return f
   
