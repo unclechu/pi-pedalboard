@@ -28,11 +28,31 @@ buttons_map = [
 
 class BtnsThread(Thread):
   
+  is_dead = True
+  buttons = None
+  
   def __init__(self, radio):
+    self.is_dead = False
     self.radio = radio
     self.last_press_time = 0
     self.is_released = True
     Thread.__init__(self)
+  
+  def __del__(self):
+    
+    if self.is_dead: return
+    print('Stopping listening for buttons...')
+    
+    if self.buttons is not None:
+      for btn in self.buttons:
+        btn[1].when_pressed = None
+        btn[1].when_released = None
+      del self.buttons
+    
+    del self.radio
+    del self.last_press_time
+    del self.is_released
+    del self.is_dead
   
   def pressed(self, n):
     def f():
@@ -52,7 +72,8 @@ class BtnsThread(Thread):
     return f
   
   def run(self):
-    for btn in [(x[0], Button(x[1])) for x in buttons_map]:
+    self.buttons = [(x[0], Button(x[1])) for x in buttons_map]
+    for btn in self.buttons:
       btn[1].when_pressed = self.pressed(btn[0])
       btn[1].when_released = self.released(btn[0])
     print('Started buttons listening')
@@ -67,15 +88,18 @@ class SocketThread(Thread):
     self.radio   = radio
     self.conn    = conn
     self.addr    = addr
+    self.radio.trigger('add connection', connection=self)
     self.radio.on('close connections', self.__del__)
     Thread.__init__(self)
   
   def __del__(self):
     if self.is_dead: return
     self.radio.off('close connections', self.__del__)
+    # FIXME silent off
     self.radio.off('button pressed', self.send_pressed)
     self.radio.off('button released', self.send_released)
     self.conn.close()
+    self.radio.trigger('remove connection', connection=self)
     print('Connection lost for:', self.addr)
     del self.radio
     del self.conn
@@ -102,9 +126,72 @@ class SocketThread(Thread):
     self.radio.on('button released', self.send_released)
 
 
-radio = Radio()
-BtnsThread(radio).start()
+class ConnectionsHandler:
+  
+  is_dead = True
+  
+  def __init__(self, radio):
+    self.is_dead = False
+    self.connections = []
+    self.radio = radio
+    self.radio.reply('opened connections count', self.get_connections_count)
+    self.radio.on('add connection', self.register_connection)
+    self.radio.on('remove connection', self.unregister_connection)
+    print('Started connections handling')
+  
+  def __del__(self):
+    
+    if self.is_dead: return
+    
+    self.radio.stopReplying(
+      'opened connections count',
+      self.get_connections_count
+    )
+    self.radio.off('add connection', self.register_connection)
+    self.radio.off('remove connection', self.unregister_connection)
+    
+    for conn in self.connections:
+      conn.__del__()
+      del conn
+    
+    print('Stopped connections handling')
+    del self.connections
+    del self.radio
+    del self.is_dead
+  
+  def register_connection(self, connection):
+    
+    for conn in self.connections:
+      if conn == connection:
+        raise Exception('Connection already registered')
+    
+    self.connections.append(connection)
+  
+  def unregister_connection(self, connection):
+    
+    new_connections = []
+    
+    for conn in self.connections:
+      if conn != connection:
+        new_connections.append(conn)
+    
+    if len(new_connections) == len(self.connections):
+      raise Exception('Connection not found to unregister')
+    elif len(new_connections) != len(self.connections) - 1:
+      raise Exception('More than one connection to unregister')
+    else:
+      self.connections = new_connections
+  
+  def get_connections_count(self):
+    return len(self.connections)
 
+
+radio = Radio()
+
+btns = BtnsThread(radio)
+btns.start()
+
+conn_handler = ConnectionsHandler(radio)
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -117,8 +204,20 @@ try:
     conn, addr = s.accept()
     SocketThread(radio, conn, addr).start()
 except (KeyboardInterrupt, SystemExit):
+  
   print('Exiting... Closing all connections...')
   radio.trigger('close connections')
-  sleep(1)
+  
+  while True:
+    conns_count = radio.request('opened connections count')
+    if conns_count == 0: break
+    sleep(0.1)
+  
+  conn_handler.__del__()
+  del conn_handler
+  btns.__del__()
+  del btns
+  
   s.shutdown(socket.SHUT_RDWR)
+  
   print('Done')
