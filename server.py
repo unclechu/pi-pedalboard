@@ -84,14 +84,14 @@ class SocketThread(Thread):
   
   def send_pressed(self, n):
     try:
-      conn.send(bytes('button pressed|%d\n' % n, ENC))
+      self.conn.send(bytes('button pressed|%d\n' % n, ENC))
       print('Sent about button pressed to', self.addr)
     except BrokenPipeError:
       self.__del__()
   
   def send_released(self, n):
     try:
-      conn.send(bytes('button released|%d\n' % n, ENC))
+      self.conn.send(bytes('button released|%d\n' % n, ENC))
       print('Sent about button released to', self.addr)
     except BrokenPipeError:
       self.__del__()
@@ -107,6 +107,7 @@ BtnsThread(radio).start()
 
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind((TCP_IP, TCP_PORT))
 s.listen(CONNECTIONS_LIMIT)
 
@@ -119,4 +120,5 @@ except (KeyboardInterrupt, SystemExit):
   print('Exiting... Closing all connections...')
   radio.trigger('close connections')
   sleep(1)
+  s.shutdown(socket.SHUT_RDWR)
   print('Done')
