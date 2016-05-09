@@ -39,7 +39,7 @@ class Radio:
     self.listeners.append(('on', ev_name, func))
     print("Bound 'on'-handler on event '%s'" % ev_name)
   
-  def off(self, ev_name, func):
+  def off(self, ev_name, func, soft=False):
     
     new_listeners = []
     
@@ -53,7 +53,8 @@ class Radio:
         print("Unbound 'on'-handler on event '%s'" % ev_name)
     
     if len(new_listeners) == len(self.listeners):
-      raise ListenerNotFound("Listener for event '%s' not found" % ev_name)
+      if not soft:
+        raise ListenerNotFound("Listener for event '%s' not found" % ev_name)
     if len(new_listeners) != len(self.listeners) - 1:
       raise UnexpectedBehavior(
         "Removed listeners of event '%s' more than expected" % ev_name
@@ -85,7 +86,7 @@ class Radio:
   
   # 'func' argument is optional because one request name
   # can have only one listener.
-  def stopReplying(self, req_name, func=None):
+  def stopReplying(self, req_name, func=None, soft=False):
     
     new_listeners = []
     
@@ -102,7 +103,10 @@ class Radio:
         print("Unbound 'reply'-handler on request name '%s'" % req_name)
     
     if len(new_listeners) == len(self.listeners):
-      raise ListenerNotFound("Replier for request name '%s' not found" % req_name)
+      if not soft:
+        raise ListenerNotFound(
+          "Replier for request name '%s' not found" % req_name
+        )
     if len(new_listeners) != len(self.listeners) - 1:
       raise UnexpectedBehavior(
         "Removed repliers of request name '%s' more than expected" % req_name

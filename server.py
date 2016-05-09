@@ -95,9 +95,8 @@ class SocketThread(Thread):
   def __del__(self):
     if self.is_dead: return
     self.radio.off('close connections', self.__del__)
-    # FIXME silent off
-    self.radio.off('button pressed', self.send_pressed)
-    self.radio.off('button released', self.send_released)
+    self.radio.off('button pressed', self.send_pressed, soft=True)
+    self.radio.off('button released', self.send_released, soft=True)
     self.conn.close()
     self.radio.trigger('remove connection', connection=self)
     print('Connection lost for:', self.addr)
