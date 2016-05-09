@@ -40,7 +40,7 @@ class Radio:
         new_listeners.append(listener)
       else:
         print("Unbound callback on event '%s'" % ev_name)
-    if len(new_listeners) is len(self.listeners) and len(new_listeners) > 0:
+    if len(new_listeners) == len(self.listeners) and len(new_listeners) > 0:
       raise Exception('Listener not found')
     else:
       self.listeners = new_listeners
