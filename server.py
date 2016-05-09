@@ -107,14 +107,14 @@ class SocketThread(Thread):
   
   def send_pressed(self, n):
     try:
-      self.conn.send(bytes('button pressed|%d\n' % n, ENC))
+      self.conn.send(bytes('button pressed|%d' % n, ENC))
       print('Sent about button pressed to', self.addr)
     except BrokenPipeError:
       self.__del__()
   
   def send_released(self, n):
     try:
-      self.conn.send(bytes('button released|%d\n' % n, ENC))
+      self.conn.send(bytes('button released|%d' % n, ENC))
       print('Sent about button released to', self.addr)
     except BrokenPipeError:
       self.__del__()
