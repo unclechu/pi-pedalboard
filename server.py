@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-# FIXME two connections
+# pedalboard server
 
 import socket
 from threading import Thread
@@ -9,11 +8,14 @@ from gpiozero  import Button
 from signal    import pause
 from time      import sleep, time
 
+from pedalboard.radio import Radio
+
 TCP_IP            = '0.0.0.0'
 TCP_PORT          = 31415
-CONNECTIONS_LIMIT = 5
+
 ENC               = 'UTF-8'
 NEW_PRESS_DELAY   = 0.3 # in seconds
+CONNECTIONS_LIMIT = 5
 
 buttons_map = [
   (1, 3),
@@ -22,34 +24,6 @@ buttons_map = [
   (4, 27),
   (5, 22)
 ]
-
-
-class Radio:
-  
-  def __init__(self):
-    self.listeners = []
-  
-  def on(self, ev_name, func):
-    self.listeners.append((ev_name, func))
-    print("Bound callback on event '%s'" % ev_name)
-  
-  def off(self, ev_name, func):
-    new_listeners = []
-    for listener in self.listeners:
-      if listener[0] != ev_name and listener[1] is not func:
-        new_listeners.append(listener)
-      else:
-        print("Unbound callback on event '%s'" % ev_name)
-    if len(new_listeners) == len(self.listeners) and len(new_listeners) > 0:
-      raise Exception('Listener not found')
-    else:
-      self.listeners = new_listeners
-  
-  def trigger(self, ev_name, **kwargs):
-    for listener in self.listeners:
-      if listener[0] == ev_name:
-        listener[1](**kwargs)
-        print("Triggered event '%s' callback" % ev_name)
 
 
 class BtnsThread(Thread):
@@ -137,6 +111,7 @@ s.bind((TCP_IP, TCP_PORT))
 s.listen(CONNECTIONS_LIMIT)
 
 try:
+  print('Starting listening for socket connections...')
   while True:
     conn, addr = s.accept()
     SocketThread(radio, conn, addr).start()
