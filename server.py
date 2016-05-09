@@ -36,7 +36,7 @@ class BtnsThread(Thread):
     self.radio = radio
     self.last_press_time = 0
     self.is_released = True
-    Thread.__init__(self)
+    super().__init__()
   
   def __del__(self):
     
@@ -90,7 +90,7 @@ class SocketThread(Thread):
     self.addr    = addr
     self.radio.trigger('add connection', connection=self)
     self.radio.on('close connections', self.__del__)
-    Thread.__init__(self)
+    super().__init__()
   
   def __del__(self):
     if self.is_dead: return
@@ -217,6 +217,8 @@ except (KeyboardInterrupt, SystemExit):
   del conn_handler
   btns.__del__()
   del btns
+  radio.__del__()
+  del radio
   
   s.shutdown(socket.SHUT_RDWR)
   
