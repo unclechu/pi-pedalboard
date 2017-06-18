@@ -21,13 +21,22 @@ For example you have connected to your Raspberry PI over SSH and it has
 if you don't know it already).
 
 1. Go to directory that is cloned version of this repo,
-   create and init
-   [virtual environment](https://pypi.python.org/pypi/virtualenv):
+   <del>create and init
+   [virtual environment](https://pypi.python.org/pypi/virtualenv)</del>:
 
    ```bash
-   python3 -m venv -- .venv
-   source .venv/bin/activate
+   # python3 -m venv -- .venv
+   # source .venv/bin/activate
 
+   ```
+   When I try to start `./server.py` with activated **virtualenv** everything is
+   freezing on `s.bind((TCP_IP, TCP_PORT))` line, even SSH connection.
+   After that any new attempt to establish SSH connection fails until I restart
+   device by unplugging and plugging power cable again. So, **skip item 1 and
+   item 2** and **install dependencies globally instead**:
+   ```bash
+   sudo apt-get install python3-gpiozero
+   sudo pip install radio-class
    ```
 
 2. Install dependencies:
