@@ -53,7 +53,7 @@ if you don't know it already).
 
    It will start a daemon that simulates numpad keys pressing by pushing on
    buttons on pedalboard. You could use this as basic example for everything
-   you could imagine. I'm actually use it for switching between
+   you could imagine. I'm actually using it for switching between
    [guitarix](http://guitarix.org/) presets.
 
 ## Author
