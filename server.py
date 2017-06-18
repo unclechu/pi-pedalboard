@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # pedalboard server
 
 import socket
@@ -41,7 +40,7 @@ class BtnsThread(Thread):
   def __del__(self):
 
     if self.is_dead: return
-    print('Stopping listening for buttons...')
+    print('Stopping listening for buttons…')
 
     if self.buttons is not None:
       for btn in self.buttons:
@@ -198,13 +197,13 @@ s.bind((TCP_IP, TCP_PORT))
 s.listen(CONNECTIONS_LIMIT)
 
 try:
-  print('Starting listening for socket connections...')
+  print('Starting listening for socket connections…')
   while True:
     conn, addr = s.accept()
     SocketThread(radio, conn, addr).start()
 except (KeyboardInterrupt, SystemExit):
 
-  print('Exiting... Closing all connections...')
+  print('Exiting… Closing all connections…')
   radio.trigger('close connections')
 
   while True:
