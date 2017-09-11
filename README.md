@@ -2,7 +2,7 @@
 
 Pedalboard implementation for Raspberry Pi microcomputer.
 
-![pedalboard photo](./_stuff/pedalboard_photo_1.jpg)
+![pedalboard photo](./_stuff/pedalboard_photo_2_pluggable.jpg)
 
 ## Requirements
 
