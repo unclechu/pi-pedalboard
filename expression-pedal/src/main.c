@@ -18,29 +18,32 @@
 #define ERR(msg, ...) fprintf(stderr, "JACK ERROR: " msg "\n", ##__VA_ARGS__);
 
 char jack_client_name[128] = "pi-pedalboard-expression-pedal";
-uint32_t sample_rate = 0, buffer_size = 0;
-jack_client_t *jack_client = NULL;
-jack_port_t *send_port = NULL, *return_port = NULL;
-jack_default_audio_sample_t *send_buf = NULL, *return_buf = NULL;
+
+typedef struct {
+  uint32_t sample_rate, buffer_size;
+  jack_client_t *jack_client;
+  jack_port_t *send_port, *return_port;
+  jack_default_audio_sample_t *send_buf, *return_buf;
+} State;
 
 int jack_process(jack_nframes_t nframes, void *arg)
 {
-  // TODO
+  State *state = (State *)arg;
   return 0;
 }
 
-void register_ports()
+void register_ports(State *state)
 {
   LOG("Registering send port…");
 
-  send_port = jack_port_register( jack_client
-                                , "send"
-                                , JACK_DEFAULT_AUDIO_TYPE
-                                , JackPortIsOutput
-                                , 0
-                                );
+  state->send_port = jack_port_register( state->jack_client
+                                       , "send"
+                                       , JACK_DEFAULT_AUDIO_TYPE
+                                       , JackPortIsOutput
+                                       , 0
+                                       );
 
-  if (send_port == NULL) {
+  if (state->send_port == NULL) {
     ERR("Registering send port failed!");
     exit(EXIT_FAILURE);
   }
@@ -48,14 +51,14 @@ void register_ports()
   LOG("Send port is registered.");
   LOG("Registering return port…");
 
-  return_port = jack_port_register( jack_client
-                                  , "return"
-                                  , JACK_DEFAULT_AUDIO_TYPE
-                                  , JackPortIsInput
-                                  , 0
-                                  );
+  state->return_port = jack_port_register( state->jack_client
+                                         , "return"
+                                         , JACK_DEFAULT_AUDIO_TYPE
+                                         , JackPortIsInput
+                                         , 0
+                                         );
 
-  if (return_port == NULL) {
+  if (state->return_port == NULL) {
     ERR("Registering send port failed!");
     exit(EXIT_FAILURE);
   }
@@ -65,30 +68,79 @@ void register_ports()
 
 int set_sample_rate(jack_nframes_t nframes, void *arg)
 {
-  sample_rate = nframes;
-  LOG("New sample rate: %d", sample_rate);
+  State *state = (State *)arg;
+  state->sample_rate = nframes;
+  LOG("New sample rate: %d", nframes);
   return 0;
 }
 
 int set_buffer_size(jack_nframes_t nframes, void *arg)
 {
-  buffer_size = nframes;
+  State *state = (State *)arg;
+  state->buffer_size = nframes;
   LOG("New buffer size: %d", nframes);
   return 0;
 }
 
+void bind_callbacks(State *state)
+{
+  LOG("Binding process callback…");
+  jack_set_process_callback(state->jack_client, jack_process, (void *)state);
+  LOG("Process callback is bound.");
+
+  LOG("Binding sample rate callback…");
+
+  jack_set_sample_rate_callback( state->jack_client
+                               , set_sample_rate
+                               , (void *)state
+                               );
+
+  LOG("Sample rate callback is bound.");
+
+  LOG("Binding buffer size callback…");
+
+  jack_set_buffer_size_callback( state->jack_client
+                               , set_buffer_size
+                               , (void *)state
+                               );
+
+  LOG("Buffer size callback is bound.");
+}
+
+void null_state(State *state)
+{
+  state->sample_rate = 0;
+  state->buffer_size = 0;
+  state->jack_client = NULL;
+  state->send_port   = NULL;
+  state->return_port = NULL;
+  state->send_buf    = NULL;
+  state->return_buf  = NULL;
+}
+
 int main()
 {
-  jack_status_t status;
+  LOG("Initialization of state…");
+  State *state = (State *)malloc(sizeof(State));
+
+  if (!state) {
+    ERR("State initialization failed!");
+    return EXIT_FAILURE;
+  }
+
+  null_state(state);
+  LOG("State is initialized…");
+
   LOG("Opening client…");
+  jack_status_t status;
 
-  jack_client = jack_client_open( jack_client_name
-                                , JackNullOption
-                                , &status
-                                , NULL
-                                );
+  state->jack_client = jack_client_open( jack_client_name
+                                       , JackNullOption
+                                       , &status
+                                       , NULL
+                                       );
 
-  if (jack_client == NULL) {
+  if (state->jack_client == NULL) {
     ERR("Opening client failed!");
     return EXIT_FAILURE;
   }
@@ -99,21 +151,10 @@ int main()
   }
 
   LOG("Client is opened.");
-  register_ports();
+  register_ports(state);
+  bind_callbacks(state);
 
-  LOG("Binding process callback…");
-  jack_set_process_callback(jack_client, jack_process, 0);
-  LOG("Process callback is bound.");
-
-  LOG("Binding sample rate callback…");
-  jack_set_sample_rate_callback(jack_client, set_sample_rate, 0);
-  LOG("Sample rate callback is bound.");
-
-  LOG("Binding buffer size callback…");
-  jack_set_buffer_size_callback(jack_client, set_buffer_size, 0);
-  LOG("Buffer size callback is bound.");
-
-  if (jack_activate(jack_client)) {
+  if (jack_activate(state->jack_client)) {
     ERR("Activating client failed!");
     return EXIT_FAILURE;
   }
