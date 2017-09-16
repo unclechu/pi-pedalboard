@@ -118,14 +118,14 @@ void null_state(State *state)
   state->return_buf  = NULL;
 }
 
-int main()
+void init()
 {
   LOG("Initialization of state…");
   State *state = (State *)malloc(sizeof(State));
 
   if (!state) {
     ERR("State initialization failed!");
-    return EXIT_FAILURE;
+    exit(EXIT_FAILURE);
   }
 
   null_state(state);
@@ -142,12 +142,12 @@ int main()
 
   if (state->jack_client == NULL) {
     ERR("Opening client failed!");
-    return EXIT_FAILURE;
+    exit(EXIT_FAILURE);
   }
 
   if (status & JackNameNotUnique) {
     ERR("Client name '%s' is already taken!", jack_client_name);
-    return EXIT_FAILURE;
+    exit(EXIT_FAILURE);
   }
 
   LOG("Client is opened.");
@@ -156,9 +156,14 @@ int main()
 
   if (jack_activate(state->jack_client)) {
     ERR("Activating client failed!");
-    return EXIT_FAILURE;
+    exit(EXIT_FAILURE);
   }
+}
 
+int main()
+{
+  LOG("Starting of application…");
+  init();
   sleep(-1);
   return EXIT_SUCCESS;
 }
