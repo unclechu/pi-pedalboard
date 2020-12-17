@@ -26,7 +26,7 @@
 #define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
 #define EQ(a, b) (strcmp((a), (b)) == 0)
-#define MAX_VALUE 255
+#define MAX_VALUE UINT8_MAX
 
 #define MALLOC_CHECK(a) \
   if (a == NULL) { \
@@ -84,13 +84,13 @@ void* handle_value_updates(void *arg)
       } else {
         value = state->value_changes_queue.head->value;
         Node *tmp_node = state->value_changes_queue.head;
-        tmp_node->next = NULL;
         state->value_changes_queue.head = state->value_changes_queue.head->next;
 
         if (state->value_changes_queue.head == NULL)
           state->value_changes_queue.tail = NULL;
 
         pthread_mutex_unlock(&state->queue_lock);
+        tmp_node->next = NULL;
         free(tmp_node);
 
         if (state->binary_output) {
