@@ -1,6 +1,6 @@
 NAME = expression-pedal
 BUILD_DIR = ./build
-LIBS = `pkg-config --cflags --libs jack`
+LIBS = $(shell pkg-config --cflags --libs jack) -lm
 
 ifeq ($(DEBUG),Y)
 	C_FLAGS = -g -Og -DDEBUG
@@ -16,4 +16,4 @@ $(NAME):
 		-o $(BUILD_DIR)/$(NAME) $(C_FLAGS)
 
 clean:
-	rm -rf "$(BUILD_DIR)/$(NAME)"
+	rm -rf $(BUILD_DIR)/$(NAME)
