@@ -359,6 +359,7 @@ void run( Offset offset
   }
 
   pthread_join(tid, NULL);
+  pthread_mutex_destroy(&thread_lock);
   pthread_mutex_destroy(&queue_lock);
   /* sleep(-1); */
 }
