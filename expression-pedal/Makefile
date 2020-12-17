@@ -1,6 +1,6 @@
 NAME = expression-pedal
 BUILD_DIR = ./build
-LIBS = $(shell pkg-config --cflags --libs jack) -lm
+LIBS = $(shell pkg-config --cflags --libs jack) -lm -lpthread
 
 ifeq ($(DEBUG),Y)
 	C_FLAGS = -g -Og -DDEBUG

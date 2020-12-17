@@ -7,6 +7,6 @@ pkgs.mkShell {
   ];
   buildInputs = [
     pkgs.jack2
-    pkgs.glibc # for libm.so
+    pkgs.glibc # for libm and libpthread
   ];
 }
