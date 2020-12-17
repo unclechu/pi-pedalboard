@@ -2,7 +2,6 @@
  * Author: Viacheslav Lotsmanov
  * License: GNU/GPLv3 https://raw.githubusercontent.com/unclechu/pi-pedalboard/master/LICENSE
  *
- * TODO implement sample step limitation to reduce cpu load
  * TODO implement binary & human-readable output
  */
 
@@ -38,6 +37,8 @@ typedef struct {
   jack_client_t *jack_client;
   jack_port_t *send_port, *return_port;
   uint8_t last_value;
+  jack_nframes_t last_sample_idx;
+  jack_nframes_t every_n_samples;
 } State;
 
 int jack_process(jack_nframes_t nframes, void *arg)
@@ -47,13 +48,21 @@ int jack_process(jack_nframes_t nframes, void *arg)
   send_buf = jack_port_get_buffer(state->send_port, nframes);
   return_buf = jack_port_get_buffer(state->return_port, nframes);
 
-  for (jack_nframes_t i = 0; i < nframes; ++i) {
+  for (
+    jack_nframes_t i = 0;
+    i < nframes;
+    ++i,
+    state->last_sample_idx
+      = (state->last_sample_idx + 1)
+      % state->every_n_samples
+  ) {
+    send_buf[i] = 1; // Send just 1 as direct current
+    if (state->last_sample_idx != 0) continue;
+
     uint8_t value = MIN(MAX(round(
       ((return_buf[i] * MAX_VALUE) - state->offset.min_offset)
         * MAX_VALUE / state->offset.max_offset
     ), 0), MAX_VALUE);
-
-    send_buf[i] = 1; // Send just 1 as direct current
 
     if (value != state->last_value) {
 
@@ -179,17 +188,19 @@ void bind_callbacks(State *state, bool calibrate)
 
 void null_state(State *state)
 {
-  Offset offset      = { 0, 0 };
-  state->offset      = offset;
-  state->sample_rate = 0;
-  state->buffer_size = 0;
-  state->jack_client = NULL;
-  state->send_port   = NULL;
-  state->return_port = NULL;
-  state->last_value  = 0;
+  Offset offset          = { 0, 0 };
+  state->offset          = offset;
+  state->sample_rate     = 0;
+  state->buffer_size     = 0;
+  state->jack_client     = NULL;
+  state->send_port       = NULL;
+  state->return_port     = NULL;
+  state->last_value      = 0;
+  state->last_sample_idx = 0;
+  state->every_n_samples = 1;
 }
 
-void init(Offset offset, bool calibrate)
+void init(Offset offset, jack_nframes_t every_n_samples, bool calibrate)
 {
   LOG("Initialization of state…");
   State *state = (State *)malloc(sizeof(State));
@@ -202,6 +213,7 @@ void init(Offset offset, bool calibrate)
   null_state(state);
   offset.max_offset += MAX_VALUE; // precalculate
   state->offset = offset;
+  state->every_n_samples = every_n_samples;
   LOG("State is initialized…");
 
   LOG("Opening client…");
@@ -241,15 +253,18 @@ void show_usage(FILE *out, char *app)
   spaces[i] = '\0';
   fprintf(out, "Usage: %s [-c|--calibrate]\n", app);
   fprintf(out, "       %s [-l|--lower INT]\n", spaces);
-  fprintf(out, "       %s [-u|--upper INT]\n\n", spaces);
+  fprintf(out, "       %s [-u|--upper INT]\n", spaces);
+  fprintf(out, "       %s [-n|--nsamples UINT]\n\n", spaces);
   fprintf(out, "Available options:\n");
-  fprintf(out, "  -c,--calibrate  Calibrate min and max bounds.\n");
-  fprintf(out, "                  Provide minimum value and see what offset you\n");
-  fprintf(out, "                  need to set for minimum value. And then provide\n");
-  fprintf(out, "                  maximum value and look at the maximum value offset.\n");
-  fprintf(out, "  -l,--lower      Set min bound correction (see --calibrate)\n");
-  fprintf(out, "  -u,--upper      Set max bound correction (see --calibrate)\n");
-  fprintf(out, "  -h,-?,--help    Show this help text\n");
+  fprintf(out, "  -c,--calibrate      Calibrate min and max bounds.\n");
+  fprintf(out, "                      Provide minimum value and see what offset you\n");
+  fprintf(out, "                      need to set for minimum value. And then provide\n");
+  fprintf(out, "                      maximum value and look at the maximum value offset.\n");
+  fprintf(out, "  -l,--lower INT      Set min bound correction (see --calibrate)\n");
+  fprintf(out, "  -u,--upper INT      Set max bound correction (see --calibrate)\n");
+  fprintf(out, "  -n,--nsamples UINT  Calculate the value each N samples\n");
+  fprintf(out, "                      (for optimization purposes)\n");
+  fprintf(out, "  -h,-?,--help        Show this help text\n");
 }
 
 int main(int argc, char *argv[])
@@ -257,6 +272,7 @@ int main(int argc, char *argv[])
   LOG("Starting of application…");
   Offset offset = { 0, 0 };
   bool calibrate = false;
+  jack_nframes_t every_n_samples = 1;
 
   for (int i = 1; i < argc; ++i) {
     if (EQ(argv[i], "--help") || EQ(argv[i], "-h") || EQ(argv[i], "-?")) {
@@ -293,6 +309,27 @@ int main(int argc, char *argv[])
         offset.max_offset = (short int)x;
         LOG("Set max offset to: %ld", x);
       }
+    } else if (EQ(argv[i], "-n") || EQ(argv[i], "--nsamples")) {
+      if (++i >= argc) {
+        fprintf(stderr, "There must be a value after “%s” argument!\n\n", argv[--i]);
+        return EXIT_FAILURE;
+      }
+
+      char *ptr;
+      long int x = strtol(argv[i], &ptr, 10);
+
+      if ( ! EQ(ptr, "") || x < 1 || x > UINT32_MAX) {
+        fprintf( stderr
+               , "Incorrect positive unsigned integer value “%s” argument "
+                 "provided for “%s”!\n\n"
+               , argv[i]
+               , argv[i-1]
+               );
+        return EXIT_FAILURE;
+      }
+
+      every_n_samples = x;
+      LOG("Set amount of samples as steps between next value calculation to: %ld", x);
     } else {
       fprintf(stderr, "Incorrect argument: “%s”!\n\n", argv[i]);
       show_usage(stderr, argv[0]);
@@ -300,7 +337,7 @@ int main(int argc, char *argv[])
     }
   }
 
-  init(offset, calibrate);
+  init(offset, every_n_samples, calibrate);
   sleep(-1);
   return EXIT_SUCCESS;
 }
