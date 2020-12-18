@@ -513,9 +513,9 @@ int main(int argc, char *argv[])
 
       long int x = atol(argv[i]);
 
-      if (x < 1 || x > UINT32_MAX) {
+      if (x < 0 || x > UINT32_MAX) {
         fprintf( stderr
-               , "Incorrect unsigned integer (starting from 1) value “%s” "
+               , "Incorrect unsigned integer value “%s” "
                  "argument provided for “%s”!\n\n"
                , argv[i]
                , argv[i-1]
