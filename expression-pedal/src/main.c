@@ -491,11 +491,12 @@ int main(int argc, char *argv[])
 {
   LOG("Starting of application…");
 
-  RmsBounds                   rms_bounds      = { 0, 0 };
-  bool                        binary_output   = false;
-  bool                        calibrate       = false;
-  jack_nframes_t              rms_window_size = 0;
-  jack_default_audio_sample_t sine_wave_freq  = 0;
+  RmsBounds                   rms_bounds_provided = { 0, 0 };
+  RmsBounds                   rms_bounds          = { 0, 0 };
+  bool                        binary_output       = false;
+  bool                        calibrate           = false;
+  jack_nframes_t              rms_window_size     = 0;
+  jack_default_audio_sample_t sine_wave_freq      = 0;
 
   for (int i = 1; i < argc; ++i) {
     if (EQ(argv[i], "--help") || EQ(argv[i], "-h") || EQ(argv[i], "-?")) {
@@ -526,9 +527,11 @@ int main(int argc, char *argv[])
 
       if (EQ(argv[i-1], "-l") || EQ(argv[i-1], "--lower")) {
         rms_bounds.rms_min_bound = (uint32_t)x;
+        rms_bounds_provided.rms_min_bound = 1;
         LOG("Setting min RMS (* 1e4) to %d…", rms_bounds.rms_min_bound);
       } else {
         rms_bounds.rms_max_bound = (uint32_t)x;
+        rms_bounds_provided.rms_max_bound = 1;
         LOG("Setting max RMS (* 1e4) to %d…", rms_bounds.rms_max_bound);
       }
     } else if (EQ(argv[i], "-c") || EQ(argv[i], "--calibrate")) {
@@ -590,7 +593,10 @@ int main(int argc, char *argv[])
 
   if (calibrate) {
     fprintf(stderr, "Running in calibration mode…\n");
-  } else if (rms_bounds.rms_min_bound <= 0 || rms_bounds.rms_max_bound <= 0) {
+  } else if (
+    rms_bounds_provided.rms_min_bound != 1 ||
+    rms_bounds_provided.rms_max_bound != 1
+  ) {
     fprintf( stderr
            , "RMS bounds were not provided, run with --calibrate "
              "to get the values first!\n\n"
