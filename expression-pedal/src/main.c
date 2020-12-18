@@ -1,6 +1,8 @@
 /**
  * Author: Viacheslav Lotsmanov
  * License: GNU/GPLv3 https://raw.githubusercontent.com/unclechu/pi-pedalboard/master/LICENSE
+ *
+ * TODO Implement logarithmic value conversion
  */
 
 #define _POSIX_SOURCE // Fix a warning about implicit declaration of “fileno”
@@ -17,12 +19,12 @@
 #include <jack/jack.h>
 
 #ifdef DEBUG
-#  define LOG(msg, ...) fprintf(stderr, "JACK LOG: " msg "\n", ##__VA_ARGS__);
+#  define LOG(msg, ...) fprintf(stderr, "DEBUG: " msg "\n", ##__VA_ARGS__);
 #else
 #  define LOG(...) ((void)0)
 #endif
 
-#define ERR(msg, ...) fprintf(stderr, "JACK ERROR: " msg "\n", ##__VA_ARGS__);
+#define ERR(msg, ...) fprintf(stderr, "ERROR: " msg "\n", ##__VA_ARGS__);
 #define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
 #define EQ(a, b) (strcmp((a), (b)) == 0)
@@ -38,6 +40,7 @@ char jack_client_name[128] = "pidalboard-expression-pedal";
 
 // Optional calibration for the lowest and the biggest values
 typedef struct { int32_t min_offset, max_offset; } Offset;
+typedef struct { uint32_t rms_min_bound, rms_max_bound; } RmsBounds;
 
 typedef struct Node Node;
 typedef struct Queue Queue;
@@ -53,17 +56,31 @@ struct Queue {
 };
 
 typedef struct {
-  Offset offset;
-  uint32_t sample_rate, buffer_size;
-  jack_client_t *jack_client;
-  jack_port_t *send_port, *return_port;
-  uint8_t last_value;
-  jack_nframes_t last_sample_idx;
-  jack_nframes_t every_n_samples;
-  bool binary_output;
-  pthread_mutex_t queue_lock;
-  Queue value_changes_queue;
-  pthread_mutex_t thread_lock;
+  jack_nframes_t      sample_rate, buffer_size;
+
+  jack_client_t       *jack_client;
+  jack_port_t         *send_port, *return_port;
+
+  uint8_t             last_value;
+
+  bool                binary_output;
+
+  pthread_mutex_t     queue_lock;
+  Queue               value_changes_queue;
+  pthread_mutex_t     thread_lock;
+
+  jack_default_audio_sample_t
+                      sine_wave_freq;
+  jack_nframes_t      sine_wave_sample_i;
+  jack_nframes_t      sine_wave_one_rotation_samples;
+
+  RmsBounds           rms_bounds;
+  bool                use_default_rms_window_size;
+  jack_nframes_t      rms_window_size;
+  jack_nframes_t      rms_window_sample_i;
+  jack_default_audio_sample_t
+                      rms_sum;
+  uint32_t            last_rms;
 } State;
 
 void* handle_value_updates(void *arg)
@@ -107,6 +124,24 @@ void* handle_value_updates(void *arg)
   }
 }
 
+inline jack_default_audio_sample_t
+  sample_radians( jack_default_audio_sample_t hz
+                , jack_nframes_t              sample_n
+                , jack_nframes_t              sample_rate
+                )
+{
+  return
+    (jack_default_audio_sample_t)sample_n * hz * 2 * M_PI
+      / (jack_default_audio_sample_t)sample_rate;
+}
+
+inline uint32_t finalize_rms( jack_nframes_t window_size
+                            , jack_default_audio_sample_t sum
+                            )
+{
+  return floor((1.0f / (jack_default_audio_sample_t)window_size) * sum * 1e4);
+}
+
 int jack_process(jack_nframes_t nframes, void *arg)
 {
   State *state = (State *)arg;
@@ -118,36 +153,52 @@ int jack_process(jack_nframes_t nframes, void *arg)
     jack_nframes_t i = 0;
     i < nframes;
     ++i,
-    state->last_sample_idx
-      = (state->last_sample_idx + 1)
-      % state->every_n_samples
+    state->sine_wave_sample_i
+      = (state->sine_wave_sample_i + 1)
+      % state->sine_wave_one_rotation_samples
   ) {
-    send_buf[i] = 1; // Send just 1 as direct current
-    if (state->last_sample_idx != 0) continue;
+    send_buf[i] = sin(sample_radians(
+      state->sine_wave_freq,
+      state->sine_wave_sample_i,
+      state->sample_rate
+    ));
 
-    uint8_t value = MIN(MAX(round(
-      ((return_buf[i] * MAX_VALUE) - state->offset.min_offset)
-        * MAX_VALUE / state->offset.max_offset
-    ), 0), MAX_VALUE);
+    if (++state->rms_window_sample_i >= state->rms_window_size) {
+      uint32_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
 
-    if (value != state->last_value) {
-      Node *new_node = malloc(sizeof(Node));
-      MALLOC_CHECK(new_node);
-      new_node->value = value;
-      new_node->next = NULL;
-      pthread_mutex_lock(&state->queue_lock);
+      if (rms != state->last_rms) {
+        state->last_rms = rms;
 
-      if (state->value_changes_queue.tail != NULL)
-        state->value_changes_queue.tail->next = new_node;
+        uint8_t value = MIN(MAX(round(
+          (rms - state->rms_bounds.rms_min_bound) * MAX_VALUE
+            / state->rms_bounds.rms_max_bound
+        ), 0), MAX_VALUE);
 
-      state->value_changes_queue.tail = new_node;
+        if (value != state->last_value) {
+          Node *new_node = malloc(sizeof(Node));
+          MALLOC_CHECK(new_node);
+          new_node->value = value;
+          new_node->next = NULL;
+          pthread_mutex_lock(&state->queue_lock);
 
-      if (state->value_changes_queue.head == NULL) // first value
-        state->value_changes_queue.head = new_node;
+          if (state->value_changes_queue.tail != NULL)
+            state->value_changes_queue.tail->next = new_node;
 
-      pthread_mutex_unlock(&state->queue_lock);
-      pthread_mutex_unlock(&state->thread_lock);
-      state->last_value = value;
+          state->value_changes_queue.tail = new_node;
+
+          if (state->value_changes_queue.head == NULL) // first value
+            state->value_changes_queue.head = new_node;
+
+          pthread_mutex_unlock(&state->queue_lock);
+          pthread_mutex_unlock(&state->thread_lock);
+          state->last_value = value;
+        }
+      }
+
+      state->rms_window_sample_i = 0;
+      state->rms_sum = powf(return_buf[i], 2);
+    } else {
+      state->rms_sum += powf(return_buf[i], 2);
     }
   }
 
@@ -165,17 +216,34 @@ int jack_process_calibrate(jack_nframes_t nframes, void *arg)
   // And it’s not very useful to write to the log more often.
   return_buf = jack_port_get_buffer(state->return_port, 1);
 
-  for (jack_nframes_t i = 0; i < nframes; ++i) send_buf[i] = 1;
+  for (
+    jack_nframes_t i = 0;
+    i < nframes;
+    ++i,
+    state->sine_wave_sample_i
+      = (state->sine_wave_sample_i + 1)
+      % state->sine_wave_one_rotation_samples
+  ) {
+    send_buf[i] = sin(sample_radians(
+      state->sine_wave_freq,
+      state->sine_wave_sample_i,
+      state->sample_rate
+    ));
 
-  int32_t value = round(MAX_VALUE * return_buf[0]);
-  uint8_t bounded_value = MIN(MAX(value, 0), MAX_VALUE);
+    if (++state->rms_window_sample_i >= state->rms_window_size) {
+      uint32_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
 
-  fprintf( stderr
-         , "Bounded value: %d; min offset: %d; max offset: %d;\n"
-         , bounded_value
-         , (value < MAX_VALUE) ? value         : 0
-         , (value > MAX_VALUE) ? (value - MAX_VALUE) : 0
-         );
+      if (rms != state->last_rms) {
+        fprintf(stderr, "New RMS (* 1e4): %d\n", rms);
+        state->last_rms = rms;
+      }
+
+      state->rms_window_sample_i = 0;
+      state->rms_sum = powf(return_buf[i], 2);
+    } else {
+      state->rms_sum += powf(return_buf[i], 2);
+    }
+  }
 
   return 0;
 }
@@ -219,6 +287,16 @@ int set_sample_rate(jack_nframes_t nframes, void *arg)
   State *state = (State *)arg;
   state->sample_rate = nframes;
   LOG("New sample rate: %d", nframes);
+
+  state->sine_wave_one_rotation_samples = round(
+    (jack_default_audio_sample_t)state->sample_rate / state->sine_wave_freq
+  );
+
+  if (state->use_default_rms_window_size) {
+    state->rms_window_size = state->sine_wave_one_rotation_samples;
+    LOG("New RMS window size: %d samples", state->rms_window_size);
+  }
+
   return 0;
 }
 
@@ -266,32 +344,41 @@ void bind_callbacks(State *state, bool calibrate)
 
 void null_state(State *state)
 {
-  Offset offset          = { 0, 0 };
-  state->offset          = offset;
   state->sample_rate     = 0;
   state->buffer_size     = 0;
   state->jack_client     = NULL;
   state->send_port       = NULL;
   state->return_port     = NULL;
   state->last_value      = 0;
-  state->last_sample_idx = 0;
-  state->every_n_samples = 1;
   state->binary_output   = false;
 
-  // cannot be initialized with NULL
+  // Cannot be initialized with NULL
   // state->queue_lock
 
   state->value_changes_queue.head = NULL;
   state->value_changes_queue.tail = NULL;
 
-  // cannot be initialized with NULL
+  // Cannot be initialized with NULL
   // state->thread_lock
+
+  state->sine_wave_freq                 = 0;
+  state->sine_wave_sample_i             = 0;
+  state->sine_wave_one_rotation_samples = 0;
+
+  RmsBounds rms_bounds               = { 0, 0 };
+  state->rms_bounds                  = rms_bounds;
+  state->use_default_rms_window_size = false;
+  state->rms_window_size             = 0;
+  state->rms_window_sample_i         = 0;
+  state->rms_sum                     = 0.0f;
+  state->last_rms                    = 0.0f;
 }
 
-void run( Offset offset
-        , jack_nframes_t every_n_samples
-        , bool binary_output
-        , bool calibrate
+void run( RmsBounds                   rms_bounds
+        , jack_default_audio_sample_t sine_wave_freq  // 0 for default value
+        , jack_nframes_t              rms_window_size // 0 for default value
+        , bool                        binary_output
+        , bool                        calibrate
         )
 {
   LOG("Initializing a mutex…");
@@ -313,12 +400,14 @@ void run( Offset offset
   MALLOC_CHECK(state);
 
   null_state(state);
-  offset.max_offset += MAX_VALUE; // precalculate
-  state->offset = offset;
-  state->every_n_samples = every_n_samples;
   state->binary_output = binary_output;
   state->queue_lock = queue_lock;
   state->thread_lock = thread_lock;
+  state->sine_wave_freq = (sine_wave_freq == 0) ? 440.0f : sine_wave_freq;
+  state->rms_bounds = rms_bounds;
+  state->rms_bounds.rms_max_bound -= state->rms_bounds.rms_min_bound; // Precalculate
+  state->use_default_rms_window_size = rms_window_size == 0;
+  if (rms_window_size != 0) state->rms_window_size = rms_window_size;
   LOG("State is initialized…");
 
   LOG("Opening client…");
@@ -370,93 +459,126 @@ void show_usage(FILE *out, char *app)
   char spaces[128];
   for (i = 0; i < strlen(app); ++i) spaces[i] = ' ';
   spaces[i] = '\0';
-  fprintf(out, "Usage: %s [-b|--binary]\n", app);
+  fprintf(out, "Usage: %s -l|--lower UINT\n", app);
+  fprintf(out, "       %s -u|--upper UINT\n", spaces);
   fprintf(out, "       %s [-c|--calibrate]\n", spaces);
-  fprintf(out, "       %s [-l|--lower INT]\n", spaces);
-  fprintf(out, "       %s [-u|--upper INT]\n", spaces);
-  fprintf(out, "       %s [-n|--nsamples UINT]\n", spaces);
+  fprintf(out, "       %s [-b|--binary]\n", spaces);
+  fprintf(out, "       %s [-f|--frequency UINT]\n", spaces);
+  fprintf(out, "       %s [-w|--rms-window UINT]\n", spaces);
   fprintf(out, "\n");
   fprintf(out, "Available options:\n");
-  fprintf(out, "  -b,--binary         Print binary unsigned 8-bit integers sequence\n");
-  fprintf(out, "                      instead of human-readable lines\n");
-  fprintf(out, "  -c,--calibrate      Calibrate min and max bounds.\n");
-  fprintf(out, "                      Provide minimum value and see what offset you\n");
-  fprintf(out, "                      need to set for minimum value. And then provide\n");
-  fprintf(out, "                      maximum value and look at the maximum value offset.\n");
-  fprintf(out, "  -l,--lower INT      Set min bound correction (see --calibrate)\n");
-  fprintf(out, "  -u,--upper INT      Set max bound correction (see --calibrate)\n");
-  fprintf(out, "  -n,--nsamples UINT  Calculate the value each N samples\n");
-  fprintf(out, "                      (for optimization purposes)\n");
-  fprintf(out, "  -h,-?,--help        Show this help text\n");
+  fprintf(out, "  -l,--lower UINT      Set min RMS (* 1e4) (see --calibrate).\n");
+  fprintf(out, "  -u,--upper UINT     Set max RMS (* 1e4) (see --calibrate).\n");
+  fprintf(out, "  -c,--calibrate        Calibrate min and max RMS bounds.\n");
+  fprintf(out, "                        Set your pedal to minimum position and record the value.\n");
+  fprintf(out, "                        Then do the same for maximum position.\n");
+  fprintf(out, "                        Use those values for --lower and --upper arguments.\n");
+  fprintf(out, "  -b,--binary           Print binary unsigned 8-bit integers sequence\n");
+  fprintf(out, "                        instead of human-readable lines.\n");
+  fprintf(out, "  -f,--frequency UINT   Frequency in Hz of a sine wave to send\n");
+  fprintf(out, "                        (default value is 440).\n");
+  fprintf(out, "  -w,--rms-window UINT  RMS window size in amount of samples\n");
+  fprintf(out, "                        (default value is one rotation of the sine wave,\n");
+  fprintf(out, "                        so sample rate divided by --frequency,\n");
+  fprintf(out, "                        so for 48000 sample rate and 440 Hz --frequency\n");
+  fprintf(out, "                        it will be ≈109).\n");
+  fprintf(out, "  -h,-?,--help          Show this help text.\n");
 }
 
 int main(int argc, char *argv[])
 {
   LOG("Starting of application…");
-  Offset offset = { 0, 0 };
-  bool binary_output = false;
-  bool calibrate = false;
-  jack_nframes_t every_n_samples = 1;
+
+  RmsBounds                   rms_bounds      = { 0, 0 };
+  bool                        binary_output   = false;
+  bool                        calibrate       = false;
+  jack_nframes_t              rms_window_size = 0;
+  jack_default_audio_sample_t sine_wave_freq  = 0;
 
   for (int i = 1; i < argc; ++i) {
     if (EQ(argv[i], "--help") || EQ(argv[i], "-h") || EQ(argv[i], "-?")) {
       show_usage(stdout, argv[0]);
       return EXIT_SUCCESS;
-    } else if (EQ(argv[i], "-b") || EQ(argv[i], "--binary")) {
-      binary_output = true;
-      fprintf(stderr, "Setting stdout output format to binary mode…\n");
-    } else if (EQ(argv[i], "-c") || EQ(argv[i], "--calibrate")) {
-      calibrate = true;
-      fprintf(stderr, "Running in calibration mode…\n");
     } else if (
       EQ(argv[i], "-l") || EQ(argv[i], "--lower") ||
       EQ(argv[i], "-u") || EQ(argv[i], "--upper")
     ) {
       if (++i >= argc) {
         fprintf(stderr, "There must be a value after “%s” argument!\n\n", argv[--i]);
+        show_usage(stderr, argv[0]);
         return EXIT_FAILURE;
       }
 
-      char *ptr;
-      long int x = strtol(argv[i], &ptr, 10);
+      long int x = atol(argv[i]);
 
-      if ( ! EQ(ptr, "") || x < SHRT_MIN || x > SHRT_MAX) {
+      if (x < 1 || x > UINT32_MAX) {
         fprintf( stderr
-               , "Incorrect integer value “%s” argument provided for “%s”!\n\n"
+               , "Incorrect unsigned integer (starting from 1) value “%s” "
+                 "argument provided for “%s”!\n\n"
                , argv[i]
                , argv[i-1]
                );
+        show_usage(stderr, argv[0]);
         return EXIT_FAILURE;
       }
 
       if (EQ(argv[i-1], "-l") || EQ(argv[i-1], "--lower")) {
-        offset.min_offset = (short int)x;
-        LOG("Set min offset to: %ld", x);
+        rms_bounds.rms_min_bound = (uint32_t)x;
+        LOG("Setting min RMS (* 1e4) to %d…", rms_bounds.rms_min_bound);
       } else {
-        offset.max_offset = (short int)x;
-        LOG("Set max offset to: %ld", x);
+        rms_bounds.rms_max_bound = (uint32_t)x;
+        LOG("Setting max RMS (* 1e4) to %d…", rms_bounds.rms_max_bound);
       }
-    } else if (EQ(argv[i], "-n") || EQ(argv[i], "--nsamples")) {
+    } else if (EQ(argv[i], "-c") || EQ(argv[i], "--calibrate")) {
+      calibrate = true;
+      LOG("Turning calibration mode on…");
+    } else if (EQ(argv[i], "-b") || EQ(argv[i], "--binary")) {
+      binary_output = true;
+      LOG("Setting stdout output format to binary mode…");
+    } else if (EQ(argv[i], "-f") || EQ(argv[i], "--frequency")) {
       if (++i >= argc) {
         fprintf(stderr, "There must be a value after “%s” argument!\n\n", argv[--i]);
+        show_usage(stderr, argv[0]);
         return EXIT_FAILURE;
       }
 
-      char *ptr;
-      long int x = strtol(argv[i], &ptr, 10);
+      long int x = atol(argv[i]);
 
-      if ( ! EQ(ptr, "") || x < 1 || x > UINT32_MAX) {
+      if (x < 1 || x > UINT32_MAX) {
         fprintf( stderr
-               , "Incorrect positive unsigned integer value “%s” argument "
-                 "provided for “%s”!\n\n"
+               , "Incorrect unsigned integer (starting from 1) value “%s” "
+                 "argument provided for “%s”!\n\n"
                , argv[i]
                , argv[i-1]
                );
+        show_usage(stderr, argv[0]);
         return EXIT_FAILURE;
       }
 
-      every_n_samples = x;
-      LOG("Set amount of samples as steps between next value calculation to: %ld", x);
+      sine_wave_freq = (jack_default_audio_sample_t)x;
+      LOG("Setting sine wave frequency to %f Hz…", sine_wave_freq);
+    } else if (EQ(argv[i], "-w") || EQ(argv[i], "--rms-window")) {
+      if (++i >= argc) {
+        fprintf(stderr, "There must be a value after “%s” argument!\n\n", argv[--i]);
+        show_usage(stderr, argv[0]);
+        return EXIT_FAILURE;
+      }
+
+      long int x = atol(argv[i]);
+
+      if (x < 1 || x > UINT32_MAX) {
+        fprintf( stderr
+               , "Incorrect unsigned integer (starting from 1) value “%s” "
+                 "argument provided for “%s”!\n\n"
+               , argv[i]
+               , argv[i-1]
+               );
+        show_usage(stderr, argv[0]);
+        return EXIT_FAILURE;
+      }
+
+      rms_window_size = (jack_nframes_t)x;
+      LOG("Setting RMS window size to %d samples…", rms_window_size);
     } else {
       fprintf(stderr, "Incorrect argument: “%s”!\n\n", argv[i]);
       show_usage(stderr, argv[0]);
@@ -464,6 +586,37 @@ int main(int argc, char *argv[])
     }
   }
 
-  run(offset, every_n_samples, binary_output, calibrate);
+  if (calibrate) {
+    fprintf(stderr, "Running in calibration mode…\n");
+  } else if (rms_bounds.rms_min_bound <= 0 || rms_bounds.rms_max_bound <= 0) {
+    fprintf( stderr
+           , "RMS bounds were not provided, run with --calibrate "
+             "to get the values first!\n\n"
+           );
+    show_usage(stderr, argv[0]);
+    return EXIT_FAILURE;
+  } else if (rms_bounds.rms_max_bound <= rms_bounds.rms_min_bound) {
+    fprintf(stderr, "RMS max bound must be higher than min bound!\n\n");
+    show_usage(stderr, argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  run(rms_bounds, sine_wave_freq, rms_window_size, binary_output, calibrate);
   return EXIT_SUCCESS;
+}
+
+// Root Mean Square (RMS) calculation.
+// This function isn’t used in the code, it’s inlined where needed.
+// Just useful to see the reference implementation.
+jack_default_audio_sample_t
+  rms( jack_default_audio_sample_t *samples_list
+     , jack_nframes_t               window_size
+     )
+{
+  jack_default_audio_sample_t sum = 0.0f;
+
+  for (jack_nframes_t i = 0; i < window_size; ++i)
+    sum += powf(samples_list[i], 2);
+
+  return (1.0f / (jack_default_audio_sample_t)window_size) * sum;
 }
