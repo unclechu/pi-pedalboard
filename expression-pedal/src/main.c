@@ -3,6 +3,8 @@
  * License: GNU/GPLv3 https://raw.githubusercontent.com/unclechu/pi-pedalboard/master/LICENSE
  *
  * TODO Implement logarithmic value conversion
+ * FIXME It dies with mutex owner error,
+ *       should reimplement blocking in value changes handler thread
  */
 
 #define _POSIX_SOURCE // Fix a warning about implicit declaration of “fileno”
