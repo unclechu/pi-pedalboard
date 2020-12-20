@@ -186,9 +186,27 @@ int jack_process(jack_nframes_t nframes, void *arg)
       if (rms != state->last_rms) {
         state->last_rms = rms;
 
+        // Add 1 because can’t divide by 0
+        double max1 = state->rms_bounds.rms_max_bound + 1;
+        double max2 = max1 + 1;
+
+        // log(max / min) / (max - min)
+        double b = log10(max1 / 1) / (max1 - 1);
+
+        // max / exp(b * max)
+        double a = max1 / exp(b * max1);
+
+        // RMS value that starts from 1 instead of 0
+        double rms_from_one = ((rms - state->rms_bounds.rms_min_bound) + 1);
+
+        // xlog(x) = a * exp (b * x)
+        // double rms_log = (a * exp(b * rms_from_one)) - 1;
+
+        // xunlog(x) = (max + min) - (a * exp (b * ((max + min) - x)))
+        double rms_unlog = (max2 - (a * exp (b * (max2 - rms_from_one))));
+
         uint8_t value = MIN(MAX(round(
-          (rms - state->rms_bounds.rms_min_bound)
-            * UINT8_MAX / state->rms_bounds.rms_max_bound
+          (rms_unlog - 1) * UINT8_MAX / state->rms_bounds.rms_max_bound
         ), 0), UINT8_MAX);
 
         if (value != state->last_value) {
