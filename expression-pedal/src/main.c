@@ -3,6 +3,7 @@
  * License: GNU/GPLv3 https://raw.githubusercontent.com/unclechu/pi-pedalboard/master/LICENSE
  *
  * TODO Implement logarithmic value conversion
+ * TODO Socket server
  */
 
 #define _POSIX_SOURCE   // Fix a warning about implicit declaration of “fileno”
@@ -25,13 +26,14 @@
 #endif
 
 #define ERR(msg, ...) fprintf(stderr, "ERROR: " msg "\n", ##__VA_ARGS__);
+#define ERRJACK(msg, ...) fprintf(stderr, "JACK ERROR: " msg "\n", ##__VA_ARGS__);
 #define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
 #define EQ(a, b) (strcmp((a), (b)) == 0)
 
 #define MALLOC_CHECK(a) \
   if (a == NULL) { \
-    fprintf(stderr, "Failed to allocate memory!\n"); \
+    ERR("Failed to allocate memory!"); \
     exit(EXIT_FAILURE); \
   }
 
@@ -43,7 +45,7 @@ char jack_client_name[128] = "pidalboard-expression-pedal";
 // arguments which would indicate that the values weren’t provided.
 typedef struct { int64_t rms_min_bound, rms_max_bound; } RmsBounds;
 
-typedef struct Node Node;
+typedef struct Node  Node;
 typedef struct Queue Queue;
 
 struct Node {
@@ -113,7 +115,7 @@ void* handle_value_updates(void *arg)
 
         if (state->binary_output) {
           if (write(stdout_fd, &value, sizeof(uint8_t)) == -1) {
-            fprintf(stderr, "Failed to write binary data to stdout!\n");
+            ERR("Failed to write binary data to stdout!");
             exit(EXIT_FAILURE);
           }
         } else {
@@ -348,6 +350,22 @@ void bind_callbacks(State *state, bool calibrate)
   LOG("Buffer size callback is bound.");
 }
 
+typedef struct {
+  pthread_t value_updates_handler_tid;
+} JackShutdownPayload;
+
+void jack_shutdown_callback(void *arg)
+{
+  LOG("Received JACK shutdown notification, terminating…");
+  JackShutdownPayload *jack_shutdown_payload = (JackShutdownPayload *)arg;
+
+  LOG("Cancelling value updates handling thread…");
+  if (pthread_cancel(jack_shutdown_payload->value_updates_handler_tid) != 0) {
+    ERR("pthread_cancel() error!");
+    exit(EXIT_FAILURE);
+  }
+}
+
 void null_state(State *state)
 {
   state->sample_rate     = 0;
@@ -387,17 +405,17 @@ void run( RmsBounds                   rms_bounds
         , bool                        calibrate
         )
 {
-  LOG("Initializing a mutex…");
+  LOG("Initializing a queue mutex…");
   pthread_mutex_t queue_lock;
   pthread_cond_t  queue_cond;
 
   if (pthread_mutex_init(&queue_lock, NULL) != 0) {
-    fprintf(stderr, "pthread_mutex_init() error!\n");
+    ERR("pthread_mutex_init() error!");
     exit(EXIT_FAILURE);
   }
 
   if (pthread_cond_init(&queue_cond, NULL) != 0) {
-    fprintf(stderr, "pthread_cond_init() error!\n");
+    ERR("pthread_cond_init() error!");
     exit(EXIT_FAILURE);
   }
 
@@ -416,7 +434,7 @@ void run( RmsBounds                   rms_bounds
   if (rms_window_size != 0) state->rms_window_size = rms_window_size;
   LOG("State is initialized…");
 
-  LOG("Opening client…");
+  LOG("Opening JACK client…");
   jack_status_t status;
 
   state->jack_client = jack_client_open( jack_client_name
@@ -426,30 +444,37 @@ void run( RmsBounds                   rms_bounds
                                        );
 
   if (state->jack_client == NULL) {
-    ERR("Opening client failed!");
+    ERRJACK("Opening client failed!");
     exit(EXIT_FAILURE);
   }
 
   if (status & JackNameNotUnique) {
-    ERR("Client name '%s' is already taken!", jack_client_name);
+    ERRJACK("Client name “%s” is already taken!", jack_client_name);
     exit(EXIT_FAILURE);
   }
 
-  LOG("Client is opened.");
+  LOG("JACK client is opened.");
   register_ports(state);
   bind_callbacks(state, calibrate);
-
-  if (jack_activate(state->jack_client)) {
-    ERR("Activating client failed!");
-    exit(EXIT_FAILURE);
-  }
 
   LOG("Running a thread for handing value updates queue…");
   pthread_t tid;
   int err = pthread_create(&tid, NULL, &handle_value_updates, (void *)state);
 
   if (err != 0) {
-    fprintf(stderr, "Failed to create a thread: [%s]\n", strerror(err));
+    ERR("Failed to create a thread: [%s]", strerror(err));
+    exit(EXIT_FAILURE);
+  }
+
+  LOG("Setting JACK shutdown callback…");
+  JackShutdownPayload jack_shutdown_payload = { tid };
+  jack_on_shutdown( state->jack_client
+                  , jack_shutdown_callback
+                  , (void *)&jack_shutdown_payload
+                  );
+
+  if (jack_activate(state->jack_client)) {
+    ERRJACK("Client activation failed!");
     exit(EXIT_FAILURE);
   }
 
@@ -575,7 +600,7 @@ int main(int argc, char *argv[])
 
       long int x = atol(argv[i]);
 
-      if (x < 1 || x > UINT32_MAX) {
+      if (x < 1 || x > JACK_MAX_FRAMES) {
         fprintf( stderr
                , "Incorrect unsigned integer (starting from 1) value “%s” "
                  "argument provided for “%s”!\n\n"
