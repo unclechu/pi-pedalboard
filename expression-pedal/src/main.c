@@ -3,11 +3,9 @@
  * License: GNU/GPLv3 https://raw.githubusercontent.com/unclechu/pi-pedalboard/master/LICENSE
  *
  * TODO Implement logarithmic value conversion
- * FIXME It dies with mutex owner error,
- *       should reimplement blocking in value changes handler thread
  */
 
-#define _POSIX_SOURCE // Fix a warning about implicit declaration of “fileno”
+#define _POSIX_SOURCE   // Fix a warning about implicit declaration of “fileno”
 #define _DEFAULT_SOURCE // Fix a warning about implicit declaration of “usleep”
 
 #include <stdio.h>
@@ -30,7 +28,6 @@
 #define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
 #define EQ(a, b) (strcmp((a), (b)) == 0)
-#define MAX_VALUE UINT8_MAX
 
 #define MALLOC_CHECK(a) \
   if (a == NULL) { \
@@ -40,15 +37,17 @@
 
 char jack_client_name[128] = "pidalboard-expression-pedal";
 
-// Optional calibration for the lowest and the biggest values
-typedef struct { int32_t min_offset, max_offset; } Offset;
-typedef struct { uint32_t rms_min_bound, rms_max_bound; } RmsBounds;
+// It’s really just a “uint32_t” (not “int64_t”) but it’s handled anyway as
+// “int64_t” in calculations in order to overcome underflows and overflows.
+// Also it is useful to set it to “-1” by default when parsing command line
+// arguments which would indicate that the values weren’t provided.
+typedef struct { int64_t rms_min_bound, rms_max_bound; } RmsBounds;
 
 typedef struct Node Node;
 typedef struct Queue Queue;
 
 struct Node {
-  uint32_t value;
+  uint8_t value;
   Node *next;
 };
 
@@ -68,8 +67,8 @@ typedef struct {
   bool                binary_output;
 
   pthread_mutex_t     queue_lock;
+  pthread_cond_t      queue_cond;
   Queue               value_changes_queue;
-  pthread_mutex_t     thread_lock;
 
   jack_default_audio_sample_t
                       sine_wave_freq;
@@ -82,7 +81,7 @@ typedef struct {
   jack_nframes_t      rms_window_sample_i;
   jack_default_audio_sample_t
                       rms_sum;
-  uint32_t            last_rms;
+  int64_t             last_rms; // In reaility it’s just a “uint32_t”
 } State;
 
 void* handle_value_updates(void *arg)
@@ -91,17 +90,17 @@ void* handle_value_updates(void *arg)
   int stdout_fd = dup(fileno(stdout));
 
   for (;;) {
-    uint32_t value = 0;
-    pthread_mutex_lock(&state->thread_lock);
+    pthread_mutex_lock(&state->queue_lock);
+    LOG("Waiting for a notification of a new value update…");
+    pthread_cond_wait(&state->queue_cond, &state->queue_lock);
+    LOG("Received a notification of a change of the value.");
 
-    next_queue_item:
-      pthread_mutex_lock(&state->queue_lock);
-
+    handle_next_queue_item_without_waiting:
       if (state->value_changes_queue.head == NULL) {
         pthread_mutex_unlock(&state->queue_lock);
         LOG("Value changes queue is empty.");
       } else {
-        value = state->value_changes_queue.head->value;
+        uint8_t value = state->value_changes_queue.head->value;
         Node *tmp_node = state->value_changes_queue.head;
         state->value_changes_queue.head = state->value_changes_queue.head->next;
 
@@ -113,7 +112,7 @@ void* handle_value_updates(void *arg)
         free(tmp_node);
 
         if (state->binary_output) {
-          if (write(stdout_fd, &value, sizeof(uint32_t)) == -1) {
+          if (write(stdout_fd, &value, sizeof(uint8_t)) == -1) {
             fprintf(stderr, "Failed to write binary data to stdout!\n");
             exit(EXIT_FAILURE);
           }
@@ -121,25 +120,30 @@ void* handle_value_updates(void *arg)
           printf("New value: %d\n", value);
         }
 
-        goto next_queue_item;
+        // Don’t wait for a next notification yet,
+        // handle whole queue before starting to wait again.
+        pthread_mutex_lock(&state->queue_lock);
+        goto handle_next_queue_item_without_waiting;
       }
   }
 }
 
-inline jack_default_audio_sample_t
-  sample_radians( jack_default_audio_sample_t hz
-                , jack_nframes_t              sample_n
-                , jack_nframes_t              sample_rate
-                )
+inline jack_default_audio_sample_t sample_radians
+( jack_default_audio_sample_t hz
+, jack_nframes_t              sample_n
+, jack_nframes_t              sample_rate
+)
 {
   return
     (jack_default_audio_sample_t)sample_n * hz * 2 * M_PI
       / (jack_default_audio_sample_t)sample_rate;
 }
 
-inline uint32_t finalize_rms( jack_nframes_t window_size
-                            , jack_default_audio_sample_t sum
-                            )
+// Should return “uint32_t” but in calculations everywhere “int64_t” is used.
+inline int64_t finalize_rms
+( jack_nframes_t              window_size
+, jack_default_audio_sample_t sum
+)
 {
   return floor((1.0f / (jack_default_audio_sample_t)window_size) * sum * 1e4);
 }
@@ -166,15 +170,15 @@ int jack_process(jack_nframes_t nframes, void *arg)
     ));
 
     if (++state->rms_window_sample_i >= state->rms_window_size) {
-      uint32_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
+      int64_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
 
       if (rms != state->last_rms) {
         state->last_rms = rms;
 
         uint8_t value = MIN(MAX(round(
-          (rms - state->rms_bounds.rms_min_bound) * MAX_VALUE
-            / state->rms_bounds.rms_max_bound
-        ), 0), MAX_VALUE);
+          (rms - state->rms_bounds.rms_min_bound)
+            * UINT8_MAX / state->rms_bounds.rms_max_bound
+        ), 0), UINT8_MAX);
 
         if (value != state->last_value) {
           Node *new_node = malloc(sizeof(Node));
@@ -191,8 +195,8 @@ int jack_process(jack_nframes_t nframes, void *arg)
           if (state->value_changes_queue.head == NULL) // first value
             state->value_changes_queue.head = new_node;
 
+          pthread_cond_signal(&state->queue_cond);
           pthread_mutex_unlock(&state->queue_lock);
-          pthread_mutex_unlock(&state->thread_lock);
           state->last_value = value;
         }
       }
@@ -233,10 +237,10 @@ int jack_process_calibrate(jack_nframes_t nframes, void *arg)
     ));
 
     if (++state->rms_window_sample_i >= state->rms_window_size) {
-      uint32_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
+      int64_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
 
       if (rms != state->last_rms) {
-        fprintf(stderr, "New RMS (* 1e4): %d\n", rms);
+        fprintf(stderr, "New RMS (* 1e4): %li\n", rms);
         state->last_rms = rms;
       }
 
@@ -357,11 +361,11 @@ void null_state(State *state)
   // Cannot be initialized with NULL
   // state->queue_lock
 
+  // Cannot be initialized with NULL
+  // state->queue_cond
+
   state->value_changes_queue.head = NULL;
   state->value_changes_queue.tail = NULL;
-
-  // Cannot be initialized with NULL
-  // state->thread_lock
 
   state->sine_wave_freq                 = 0;
   state->sine_wave_sample_i             = 0;
@@ -373,7 +377,7 @@ void null_state(State *state)
   state->rms_window_size             = 0;
   state->rms_window_sample_i         = 0;
   state->rms_sum                     = 0.0f;
-  state->last_rms                    = 0.0f;
+  state->last_rms                    = 0;
 }
 
 void run( RmsBounds                   rms_bounds
@@ -385,17 +389,17 @@ void run( RmsBounds                   rms_bounds
 {
   LOG("Initializing a mutex…");
   pthread_mutex_t queue_lock;
-  pthread_mutex_t thread_lock;
+  pthread_cond_t  queue_cond;
 
-  if (
-    pthread_mutex_init(&queue_lock, NULL) != 0 ||
-    pthread_mutex_init(&thread_lock, NULL) != 0
-  ) {
-    fprintf(stderr, "Mutex initialization failed!\n");
+  if (pthread_mutex_init(&queue_lock, NULL) != 0) {
+    fprintf(stderr, "pthread_mutex_init() error!\n");
     exit(EXIT_FAILURE);
   }
 
-  pthread_mutex_lock(&thread_lock);
+  if (pthread_cond_init(&queue_cond, NULL) != 0) {
+    fprintf(stderr, "pthread_cond_init() error!\n");
+    exit(EXIT_FAILURE);
+  }
 
   LOG("Initialization of state…");
   State *state = (State *)malloc(sizeof(State));
@@ -404,7 +408,7 @@ void run( RmsBounds                   rms_bounds
   null_state(state);
   state->binary_output = binary_output;
   state->queue_lock = queue_lock;
-  state->thread_lock = thread_lock;
+  state->queue_cond = queue_cond;
   state->sine_wave_freq = (sine_wave_freq == 0) ? 440.0f : sine_wave_freq;
   state->rms_bounds = rms_bounds;
   state->rms_bounds.rms_max_bound -= state->rms_bounds.rms_min_bound; // Precalculate
@@ -450,8 +454,8 @@ void run( RmsBounds                   rms_bounds
   }
 
   pthread_join(tid, NULL);
-  pthread_mutex_destroy(&thread_lock);
   pthread_mutex_destroy(&queue_lock);
+  pthread_cond_destroy(&queue_cond);
   /* sleep(-1); */
 }
 
@@ -491,12 +495,11 @@ int main(int argc, char *argv[])
 {
   LOG("Starting of application…");
 
-  RmsBounds                   rms_bounds_provided = { 0, 0 };
-  RmsBounds                   rms_bounds          = { 0, 0 };
-  bool                        binary_output       = false;
-  bool                        calibrate           = false;
-  jack_nframes_t              rms_window_size     = 0;
-  jack_default_audio_sample_t sine_wave_freq      = 0;
+  RmsBounds                   rms_bounds      = { -1, -1 };
+  bool                        binary_output   = false;
+  bool                        calibrate       = false;
+  jack_nframes_t              rms_window_size = 0;
+  jack_default_audio_sample_t sine_wave_freq  = 0;
 
   for (int i = 1; i < argc; ++i) {
     if (EQ(argv[i], "--help") || EQ(argv[i], "-h") || EQ(argv[i], "-?")) {
@@ -514,6 +517,7 @@ int main(int argc, char *argv[])
 
       long int x = atol(argv[i]);
 
+      // Check for “UINT32_MAX” instead of “INT64_MAX” is intentional
       if (x < 0 || x > UINT32_MAX) {
         fprintf( stderr
                , "Incorrect unsigned integer value “%s” "
@@ -526,13 +530,13 @@ int main(int argc, char *argv[])
       }
 
       if (EQ(argv[i-1], "-l") || EQ(argv[i-1], "--lower")) {
+        // Cast to “uint32_t” instead of “int64_t” is intentional
         rms_bounds.rms_min_bound = (uint32_t)x;
-        rms_bounds_provided.rms_min_bound = 1;
-        LOG("Setting min RMS (* 1e4) to %d…", rms_bounds.rms_min_bound);
+        LOG("Setting min RMS (* 1e4) to %li…", rms_bounds.rms_min_bound);
       } else {
+        // Cast to “uint32_t” instead of “int64_t” is intentional
         rms_bounds.rms_max_bound = (uint32_t)x;
-        rms_bounds_provided.rms_max_bound = 1;
-        LOG("Setting max RMS (* 1e4) to %d…", rms_bounds.rms_max_bound);
+        LOG("Setting max RMS (* 1e4) to %li…", rms_bounds.rms_max_bound);
       }
     } else if (EQ(argv[i], "-c") || EQ(argv[i], "--calibrate")) {
       calibrate = true;
@@ -593,10 +597,7 @@ int main(int argc, char *argv[])
 
   if (calibrate) {
     fprintf(stderr, "Running in calibration mode…\n");
-  } else if (
-    rms_bounds_provided.rms_min_bound != 1 ||
-    rms_bounds_provided.rms_max_bound != 1
-  ) {
+  } else if (rms_bounds.rms_min_bound < 0 || rms_bounds.rms_max_bound < 0) {
     fprintf( stderr
            , "RMS bounds were not provided, run with --calibrate "
              "to get the values first!\n\n"
