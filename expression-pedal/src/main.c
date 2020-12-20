@@ -25,17 +25,23 @@
 #  define LOG(...) ((void)0)
 #endif
 
-#define ERR(msg, ...) fprintf(stderr, "ERROR: " msg "\n", ##__VA_ARGS__);
-#define ERRJACK(msg, ...) fprintf(stderr, "JACK ERROR: " msg "\n", ##__VA_ARGS__);
+#define ERR(msg, ...) \
+  { \
+    fprintf(stderr, "ERROR: " msg "\n", ##__VA_ARGS__); \
+    exit(EXIT_FAILURE); \
+  }
+
+#define ERRJACK(msg, ...) \
+  { \
+    fprintf(stderr, "JACK ERROR: " msg "\n", ##__VA_ARGS__); \
+    exit(EXIT_FAILURE); \
+  }
+
 #define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
 #define EQ(a, b) (strcmp((a), (b)) == 0)
 
-#define MALLOC_CHECK(a) \
-  if (a == NULL) { \
-    ERR("Failed to allocate memory!"); \
-    exit(EXIT_FAILURE); \
-  }
+#define MALLOC_CHECK(a) if (a == NULL) ERR("Failed to allocate memory!");
 
 char jack_client_name[128] = "pidalboard-expression-pedal";
 
@@ -114,10 +120,8 @@ void* handle_value_updates(void *arg)
         free(tmp_node);
 
         if (state->binary_output) {
-          if (write(stdout_fd, &value, sizeof(uint8_t)) == -1) {
+          if (write(stdout_fd, &value, sizeof(uint8_t)) == -1)
             ERR("Failed to write binary data to stdout!");
-            exit(EXIT_FAILURE);
-          }
         } else {
           printf("New value: %d\n", value);
         }
@@ -258,7 +262,7 @@ int jack_process_calibrate(jack_nframes_t nframes, void *arg)
 
 void register_ports(State *state)
 {
-  LOG("Registering send port…");
+  LOG("Registering JACK send port…");
 
   state->send_port = jack_port_register( state->jack_client
                                        , "send"
@@ -267,13 +271,10 @@ void register_ports(State *state)
                                        , 0
                                        );
 
-  if (state->send_port == NULL) {
-    ERR("Registering send port failed!");
-    exit(EXIT_FAILURE);
-  }
+  if (state->send_port == NULL) ERRJACK("Registering send port failed!");
 
-  LOG("Send port is registered.");
-  LOG("Registering return port…");
+  LOG("Send JACK port is registered.");
+  LOG("Registering JACK return port…");
 
   state->return_port = jack_port_register( state->jack_client
                                          , "return"
@@ -282,19 +283,16 @@ void register_ports(State *state)
                                          , 0
                                          );
 
-  if (state->return_port == NULL) {
-    ERR("Registering send port failed!");
-    exit(EXIT_FAILURE);
-  }
+  if (state->return_port == NULL) ERRJACK("Registering send port failed!");
 
-  LOG("Return port is registered.");
+  LOG("Return JACK port is registered.");
 }
 
 int set_sample_rate(jack_nframes_t nframes, void *arg)
 {
   State *state = (State *)arg;
   state->sample_rate = nframes;
-  LOG("New sample rate: %d", nframes);
+  LOG("New JACK sample rate received: %d", nframes);
 
   state->sine_wave_one_rotation_samples = round(
     (jack_default_audio_sample_t)state->sample_rate / state->sine_wave_freq
@@ -312,42 +310,53 @@ int set_buffer_size(jack_nframes_t nframes, void *arg)
 {
   State *state = (State *)arg;
   state->buffer_size = nframes;
-  LOG("New buffer size: %d", nframes);
+  LOG("New JACK buffer size: %d", nframes);
   return 0;
 }
 
 void bind_callbacks(State *state, bool calibrate)
 {
   if (calibrate) {
-    LOG("Binding process callback for calibration mode…");
-    jack_set_process_callback( state->jack_client
-                             , jack_process_calibrate
-                             , (void *)state
-                             );
-    LOG("Process callback for calibration mode is bound.");
+    LOG("Binding JACK process callback for calibration mode…");
+
+    if (jack_set_process_callback(
+      state->jack_client,
+      jack_process_calibrate,
+      (void *)state
+    )) ERRJACK("jack_set_process_callback() error!");
+
+    LOG("JACK process callback for calibration mode is bound.");
   } else {
-    LOG("Binding process callback…");
-    jack_set_process_callback(state->jack_client, jack_process, (void *)state);
-    LOG("Process callback is bound.");
+    LOG("Binding JACK process callback…");
+
+    if (jack_set_process_callback(
+      state->jack_client,
+      jack_process,
+      (void *)state
+    )) ERRJACK("jack_set_process_callback() error!");
+
+    LOG("JACK process callback is bound.");
   }
 
-  LOG("Binding sample rate callback…");
+  LOG("Binding JACK sample rate callback…");
 
-  jack_set_sample_rate_callback( state->jack_client
-                               , set_sample_rate
-                               , (void *)state
-                               );
+  if (jack_set_sample_rate_callback(
+    state->jack_client,
+    set_sample_rate,
+    (void *)state
+  ) != 0) ERRJACK("jack_set_sample_rate_callback() error!");
 
-  LOG("Sample rate callback is bound.");
+  LOG("JACK sample rate callback is bound.");
 
-  LOG("Binding buffer size callback…");
+  LOG("Binding JACK buffer size callback…");
 
-  jack_set_buffer_size_callback( state->jack_client
-                               , set_buffer_size
-                               , (void *)state
-                               );
+  if (jack_set_buffer_size_callback(
+    state->jack_client,
+    set_buffer_size,
+    (void *)state
+  ) != 0) ERRJACK("jack_set_buffer_size_callback() error!");
 
-  LOG("Buffer size callback is bound.");
+  LOG("JACK buffer size callback is bound.");
 }
 
 typedef struct {
@@ -360,10 +369,8 @@ void jack_shutdown_callback(void *arg)
   JackShutdownPayload *jack_shutdown_payload = (JackShutdownPayload *)arg;
 
   LOG("Cancelling value updates handling thread…");
-  if (pthread_cancel(jack_shutdown_payload->value_updates_handler_tid) != 0) {
+  if (pthread_cancel(jack_shutdown_payload->value_updates_handler_tid) != 0)
     ERR("pthread_cancel() error!");
-    exit(EXIT_FAILURE);
-  }
 }
 
 void null_state(State *state)
@@ -409,15 +416,11 @@ void run( RmsBounds                   rms_bounds
   pthread_mutex_t queue_lock;
   pthread_cond_t  queue_cond;
 
-  if (pthread_mutex_init(&queue_lock, NULL) != 0) {
+  if (pthread_mutex_init(&queue_lock, NULL) != 0)
     ERR("pthread_mutex_init() error!");
-    exit(EXIT_FAILURE);
-  }
 
-  if (pthread_cond_init(&queue_cond, NULL) != 0) {
+  if (pthread_cond_init(&queue_cond, NULL) != 0)
     ERR("pthread_cond_init() error!");
-    exit(EXIT_FAILURE);
-  }
 
   LOG("Initialization of state…");
   State *state = (State *)malloc(sizeof(State));
@@ -443,15 +446,10 @@ void run( RmsBounds                   rms_bounds
                                        , NULL
                                        );
 
-  if (state->jack_client == NULL) {
-    ERRJACK("Opening client failed!");
-    exit(EXIT_FAILURE);
-  }
+  if (state->jack_client == NULL) ERRJACK("Opening client failed!");
 
-  if (status & JackNameNotUnique) {
+  if (status & JackNameNotUnique)
     ERRJACK("Client name “%s” is already taken!", jack_client_name);
-    exit(EXIT_FAILURE);
-  }
 
   LOG("JACK client is opened.");
   register_ports(state);
@@ -461,10 +459,7 @@ void run( RmsBounds                   rms_bounds
   pthread_t tid;
   int err = pthread_create(&tid, NULL, &handle_value_updates, (void *)state);
 
-  if (err != 0) {
-    ERR("Failed to create a thread: [%s]", strerror(err));
-    exit(EXIT_FAILURE);
-  }
+  if (err != 0) ERR("Failed to create a thread: [%s]", strerror(err));
 
   LOG("Setting JACK shutdown callback…");
   JackShutdownPayload jack_shutdown_payload = { tid };
@@ -473,10 +468,7 @@ void run( RmsBounds                   rms_bounds
                   , (void *)&jack_shutdown_payload
                   );
 
-  if (jack_activate(state->jack_client)) {
-    ERRJACK("Client activation failed!");
-    exit(EXIT_FAILURE);
-  }
+  if (jack_activate(state->jack_client)) ERRJACK("Client activation failed!");
 
   pthread_join(tid, NULL);
   pthread_mutex_destroy(&queue_lock);
@@ -642,10 +634,10 @@ int main(int argc, char *argv[])
 // Root Mean Square (RMS) calculation.
 // This function isn’t used in the code, it’s inlined where needed.
 // Just useful to see the reference implementation.
-jack_default_audio_sample_t
-  rms( jack_default_audio_sample_t *samples_list
-     , jack_nframes_t               window_size
-     )
+jack_default_audio_sample_t rms
+( jack_default_audio_sample_t *samples_list
+, jack_nframes_t               window_size
+)
 {
   jack_default_audio_sample_t sum = 0.0f;
 
