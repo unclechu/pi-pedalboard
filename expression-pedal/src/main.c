@@ -490,8 +490,8 @@ void show_usage(FILE *out, char *app)
   fprintf(out, "       %s [-w|--rms-window UINT]\n", spaces);
   fprintf(out, "\n");
   fprintf(out, "Available options:\n");
-  fprintf(out, "  -l,--lower UINT      Set min RMS (* 1e4) (see --calibrate).\n");
-  fprintf(out, "  -u,--upper UINT     Set max RMS (* 1e4) (see --calibrate).\n");
+  fprintf(out, "  -l,--lower UINT       Set min RMS (* 1e4) (see --calibrate).\n");
+  fprintf(out, "  -u,--upper UINT       Set max RMS (* 1e4) (see --calibrate).\n");
   fprintf(out, "  -c,--calibrate        Calibrate min and max RMS bounds.\n");
   fprintf(out, "                        Set your pedal to minimum position and record the value.\n");
   fprintf(out, "                        Then do the same for maximum position.\n");
