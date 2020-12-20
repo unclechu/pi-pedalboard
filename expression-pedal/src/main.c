@@ -43,6 +43,9 @@
 
 #define MALLOC_CHECK(a) if (a == NULL) ERR("Failed to allocate memory!");
 
+#define RMS_LOG "RMS (× 1e4)"
+#define RMS_SHIFT(x) (x * 1e4)
+
 char jack_client_name[128] = "pidalboard-expression-pedal";
 
 // It’s really just a “uint32_t” (not “int64_t”) but it’s handled anyway as
@@ -151,7 +154,9 @@ inline int64_t finalize_rms
 , jack_default_audio_sample_t sum
 )
 {
-  return floor((1.0f / (jack_default_audio_sample_t)window_size) * sum * 1e4);
+  return floor(RMS_SHIFT(
+    (1.0f / (jack_default_audio_sample_t)window_size) * sum
+  ));
 }
 
 int jack_process(jack_nframes_t nframes, void *arg)
@@ -246,7 +251,7 @@ int jack_process_calibrate(jack_nframes_t nframes, void *arg)
       int64_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
 
       if (rms != state->last_rms) {
-        fprintf(stderr, "New RMS (* 1e4): %li\n", rms);
+        fprintf(stderr, "New "RMS_LOG": %li\n", rms);
         state->last_rms = rms;
       }
 
@@ -490,8 +495,8 @@ void show_usage(FILE *out, char *app)
   fprintf(out, "       %s [-w|--rms-window UINT]\n", spaces);
   fprintf(out, "\n");
   fprintf(out, "Available options:\n");
-  fprintf(out, "  -l,--lower UINT       Set min RMS (* 1e4) (see --calibrate).\n");
-  fprintf(out, "  -u,--upper UINT       Set max RMS (* 1e4) (see --calibrate).\n");
+  fprintf(out, "  -l,--lower UINT       Set min "RMS_LOG" (see --calibrate).\n");
+  fprintf(out, "  -u,--upper UINT       Set max "RMS_LOG" (see --calibrate).\n");
   fprintf(out, "  -c,--calibrate        Calibrate min and max RMS bounds.\n");
   fprintf(out, "                        Set your pedal to minimum position and record the value.\n");
   fprintf(out, "                        Then do the same for maximum position.\n");
@@ -549,11 +554,11 @@ int main(int argc, char *argv[])
       if (EQ(argv[i-1], "-l") || EQ(argv[i-1], "--lower")) {
         // Cast to “uint32_t” instead of “int64_t” is intentional
         rms_bounds.rms_min_bound = (uint32_t)x;
-        LOG("Setting min RMS (* 1e4) to %li…", rms_bounds.rms_min_bound);
+        LOG("Setting min "RMS_LOG" to %li…", rms_bounds.rms_min_bound);
       } else {
         // Cast to “uint32_t” instead of “int64_t” is intentional
         rms_bounds.rms_max_bound = (uint32_t)x;
-        LOG("Setting max RMS (* 1e4) to %li…", rms_bounds.rms_max_bound);
+        LOG("Setting max "RMS_LOG" to %li…", rms_bounds.rms_max_bound);
       }
     } else if (EQ(argv[i], "-c") || EQ(argv[i], "--calibrate")) {
       calibrate = true;
