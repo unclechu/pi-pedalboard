@@ -43,8 +43,8 @@
 
 #define MALLOC_CHECK(a) if (a == NULL) ERR("Failed to allocate memory!");
 
-#define RMS_LOG "RMS (× 1e4)"
-#define RMS_SHIFT(x) (x * 1e4)
+#define RMS_LOG "RMS (× 1e5)"
+#define RMS_SHIFT(x) (x * 1e5)
 
 char jack_client_name[128] = "pidalboard-expression-pedal";
 
