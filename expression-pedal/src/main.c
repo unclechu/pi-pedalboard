@@ -455,6 +455,22 @@ void run
                   , (void *)&jack_shutdown_payload
                   );
 
+  if (state->binary_output)
+    fprintf(
+      stderr,
+      "Playing sine wave, analyzing returned signal "
+      "and printing detected values as "
+      "8-bit binary unsigned integers sequentially…\n"
+    );
+  else
+    fprintf(
+      stderr,
+      "Playing sine wave, analyzing returned signal "
+      "and printing detected values (in range from 0 to %d) "
+      "as lines with human-readable text…\n",
+      UINT8_MAX
+    );
+
   if (jack_activate(state->jack_client)) ERRJACK("Client activation failed!");
 
   pthread_join(tid, NULL);
