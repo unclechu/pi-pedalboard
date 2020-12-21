@@ -476,6 +476,9 @@ void show_usage(FILE *out, char *app)
   fprintf(out, "       %s [-f|--frequency UINT]\n", spaces);
   fprintf(out, "       %s [-w|--rms-window UINT]\n", spaces);
   fprintf(out, "\n");
+  fprintf(out, "For me (the author of the program) the range between -90 dB and -6 dB works well:\n");
+  fprintf(out, "  %s -l -90 -u -6\n", app);
+  fprintf(out, "\n");
   fprintf(out, "Available options:\n");
   fprintf(out, "  -l,--lower FLOAT      Set min RMS in dB (see --calibrate).\n");
   fprintf(out, "  -u,--upper FLOAT      Set max RMS in dB (see --calibrate).\n");
