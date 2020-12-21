@@ -2,7 +2,6 @@
  * Author: Viacheslav Lotsmanov
  * License: GNU/GPLv3 https://raw.githubusercontent.com/unclechu/pi-pedalboard/master/LICENSE
  *
- * TODO Implement logarithmic value conversion
  * TODO Socket server
  */
 
@@ -16,6 +15,7 @@
 #include <string.h>
 #include <limits.h>
 #include <math.h>
+#include <float.h>
 #include <pthread.h>
 #include <jack/jack.h>
 
@@ -43,17 +43,13 @@
 
 #define MALLOC_CHECK(a) if (a == NULL) ERR("Failed to allocate memory!");
 
-#define RMS_LOG "RMS (× 1e5)"
-#define RMS_SHIFT(x) (x * 1e5)
+#define AMP_TO_DB(amp) (20 * log10(amp))
+#define DB_TO_AMP(dB) (pow(10, (dB / 20))
 
 char jack_client_name[128] = "pidalboard-expression-pedal";
 
-// It’s really just a “uint32_t” (not “int64_t”) but it’s handled anyway as
-// “int64_t” in calculations in order to overcome underflows and overflows.
-// Also it is useful to set it to “-1” by default when parsing command line
-// arguments which would indicate that the values weren’t provided.
-typedef struct { int64_t rms_min_bound, rms_max_bound; } RmsBounds;
-
+typedef jack_default_audio_sample_t sample_t; // shorter name
+typedef struct { sample_t rms_min_bound, rms_max_bound; } RmsBounds; // in dB
 typedef struct Node  Node;
 typedef struct Queue Queue;
 
@@ -81,8 +77,7 @@ typedef struct {
   pthread_cond_t      queue_cond;
   Queue               value_changes_queue;
 
-  jack_default_audio_sample_t
-                      sine_wave_freq;
+  sample_t            sine_wave_freq;
   jack_nframes_t      sine_wave_sample_i;
   jack_nframes_t      sine_wave_one_rotation_samples;
 
@@ -90,9 +85,8 @@ typedef struct {
   bool                use_default_rms_window_size;
   jack_nframes_t      rms_window_size;
   jack_nframes_t      rms_window_sample_i;
-  jack_default_audio_sample_t
-                      rms_sum;
-  int64_t             last_rms; // In reaility it’s just a “uint32_t”
+  sample_t            rms_sum;
+  sample_t            last_rms_db;
 } State;
 
 void* handle_value_updates(void *arg)
@@ -137,34 +131,26 @@ void* handle_value_updates(void *arg)
   }
 }
 
-inline jack_default_audio_sample_t sample_radians
-( jack_default_audio_sample_t hz
-, jack_nframes_t              sample_n
-, jack_nframes_t              sample_rate
+inline sample_t sample_radians
+( sample_t       hz
+, jack_nframes_t sample_n
+, jack_nframes_t sample_rate
 )
 {
-  return
-    (jack_default_audio_sample_t)sample_n * hz * 2 * M_PI
-      / (jack_default_audio_sample_t)sample_rate;
+  return (sample_t)sample_n * hz * 2 * M_PI / (sample_t)sample_rate;
 }
 
 // Should return “uint32_t” but in calculations everywhere “int64_t” is used.
-inline int64_t finalize_rms
-( jack_nframes_t              window_size
-, jack_default_audio_sample_t sum
-)
+inline sample_t finalize_rms_db(jack_nframes_t window_size, sample_t sum)
 {
-  return floor(RMS_SHIFT(
-    (1.0f / (jack_default_audio_sample_t)window_size) * sum
-  ));
+  return AMP_TO_DB(1.0f / (sample_t)window_size * sum);
 }
 
 int jack_process(jack_nframes_t nframes, void *arg)
 {
-  State *state = (State *)arg;
-  jack_default_audio_sample_t *send_buf, *return_buf;
-  send_buf = jack_port_get_buffer(state->send_port, nframes);
-  return_buf = jack_port_get_buffer(state->return_port, nframes);
+  State    *state      = (State *)arg;
+  sample_t *send_buf   = jack_port_get_buffer(state->send_port,   nframes);
+  sample_t *return_buf = jack_port_get_buffer(state->return_port, nframes);
 
   for (
     jack_nframes_t i = 0;
@@ -181,32 +167,14 @@ int jack_process(jack_nframes_t nframes, void *arg)
     ));
 
     if (++state->rms_window_sample_i >= state->rms_window_size) {
-      int64_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
+      sample_t rms_db = finalize_rms_db(state->rms_window_size, state->rms_sum);
 
-      if (rms != state->last_rms) {
-        state->last_rms = rms;
-
-        // Add 1 because can’t divide by 0
-        double max1 = state->rms_bounds.rms_max_bound + 1;
-        double max2 = max1 + 1;
-
-        // log(max / min) / (max - min)
-        double b = log10(max1 / 1) / (max1 - 1);
-
-        // max / exp(b * max)
-        double a = max1 / exp(b * max1);
-
-        // RMS value that starts from 1 instead of 0
-        double rms_from_one = ((rms - state->rms_bounds.rms_min_bound) + 1);
-
-        // xlog(x) = a * exp (b * x)
-        // double rms_log = (a * exp(b * rms_from_one)) - 1;
-
-        // xunlog(x) = (max + min) - (a * exp (b * ((max + min) - x)))
-        double rms_unlog = (max2 - (a * exp (b * (max2 - rms_from_one))));
+      if (rms_db != state->last_rms_db) {
+        state->last_rms_db = rms_db;
 
         uint8_t value = MIN(MAX(round(
-          (rms_unlog - 1) * UINT8_MAX / state->rms_bounds.rms_max_bound
+          (rms_db - state->rms_bounds.rms_min_bound)
+            * UINT8_MAX / state->rms_bounds.rms_max_bound
         ), 0), UINT8_MAX);
 
         if (value != state->last_value) {
@@ -242,14 +210,9 @@ int jack_process(jack_nframes_t nframes, void *arg)
 
 int jack_process_calibrate(jack_nframes_t nframes, void *arg)
 {
-  State *state = (State *)arg;
-  jack_default_audio_sample_t *send_buf, *return_buf;
-
-  send_buf = jack_port_get_buffer(state->send_port, nframes);
-
-  // One sample per buffer is enough to debug it.
-  // And it’s not very useful to write to the log more often.
-  return_buf = jack_port_get_buffer(state->return_port, 1);
+  State    *state      = (State *)arg;
+  sample_t *send_buf   = jack_port_get_buffer(state->send_port,   nframes);
+  sample_t *return_buf = jack_port_get_buffer(state->return_port, nframes);
 
   for (
     jack_nframes_t i = 0;
@@ -266,11 +229,11 @@ int jack_process_calibrate(jack_nframes_t nframes, void *arg)
     ));
 
     if (++state->rms_window_sample_i >= state->rms_window_size) {
-      int64_t rms = finalize_rms(state->rms_window_size, state->rms_sum);
+      sample_t rms_db = finalize_rms_db(state->rms_window_size, state->rms_sum);
 
-      if (rms != state->last_rms) {
-        fprintf(stderr, "New "RMS_LOG": %li\n", rms);
-        state->last_rms = rms;
+      if (rms_db != state->last_rms_db) {
+        fprintf(stderr, "New RMS: %f dB\n", rms_db);
+        state->last_rms_db = rms_db;
       }
 
       state->rms_window_sample_i = 0;
@@ -318,7 +281,7 @@ int set_sample_rate(jack_nframes_t nframes, void *arg)
   LOG("New JACK sample rate received: %d", nframes);
 
   state->sine_wave_one_rotation_samples = round(
-    (jack_default_audio_sample_t)state->sample_rate / state->sine_wave_freq
+    (sample_t)state->sample_rate / state->sine_wave_freq
   );
 
   if (state->use_default_rms_window_size) {
@@ -415,25 +378,26 @@ void null_state(State *state)
   state->value_changes_queue.head = NULL;
   state->value_changes_queue.tail = NULL;
 
-  state->sine_wave_freq                 = 0;
+  state->sine_wave_freq                 = 0.0f;
   state->sine_wave_sample_i             = 0;
   state->sine_wave_one_rotation_samples = 0;
 
-  RmsBounds rms_bounds               = { 0, 0 };
+  RmsBounds rms_bounds               = { 0.0f, 0.0f };
   state->rms_bounds                  = rms_bounds;
   state->use_default_rms_window_size = false;
   state->rms_window_size             = 0;
   state->rms_window_sample_i         = 0;
   state->rms_sum                     = 0.0f;
-  state->last_rms                    = 0;
+  state->last_rms_db                 = 0.0f;
 }
 
-void run( RmsBounds                   rms_bounds
-        , jack_default_audio_sample_t sine_wave_freq  // 0 for default value
-        , jack_nframes_t              rms_window_size // 0 for default value
-        , bool                        binary_output
-        , bool                        calibrate
-        )
+void run
+( RmsBounds      rms_bounds
+, sample_t       sine_wave_freq  // 0 for default value
+, jack_nframes_t rms_window_size // 0 for default value
+, bool           binary_output
+, bool           calibrate
+)
 {
   LOG("Initializing a queue mutex…");
   pthread_mutex_t queue_lock;
@@ -505,16 +469,16 @@ void show_usage(FILE *out, char *app)
   char spaces[128];
   for (i = 0; i < strlen(app); ++i) spaces[i] = ' ';
   spaces[i] = '\0';
-  fprintf(out, "Usage: %s -l|--lower UINT\n", app);
-  fprintf(out, "       %s -u|--upper UINT\n", spaces);
+  fprintf(out, "Usage: %s -l|--lower FLOAT\n", app);
+  fprintf(out, "       %s -u|--upper FLOAT\n", spaces);
   fprintf(out, "       %s [-c|--calibrate]\n", spaces);
   fprintf(out, "       %s [-b|--binary]\n", spaces);
   fprintf(out, "       %s [-f|--frequency UINT]\n", spaces);
   fprintf(out, "       %s [-w|--rms-window UINT]\n", spaces);
   fprintf(out, "\n");
   fprintf(out, "Available options:\n");
-  fprintf(out, "  -l,--lower UINT       Set min "RMS_LOG" (see --calibrate).\n");
-  fprintf(out, "  -u,--upper UINT       Set max "RMS_LOG" (see --calibrate).\n");
+  fprintf(out, "  -l,--lower FLOAT      Set min RMS in dB (see --calibrate).\n");
+  fprintf(out, "  -u,--upper FLOAT      Set max RMS in dB (see --calibrate).\n");
   fprintf(out, "  -c,--calibrate        Calibrate min and max RMS bounds.\n");
   fprintf(out, "                        Set your pedal to minimum position and record the value.\n");
   fprintf(out, "                        Then do the same for maximum position.\n");
@@ -535,11 +499,13 @@ int main(int argc, char *argv[])
 {
   LOG("Starting of application…");
 
-  RmsBounds                   rms_bounds      = { -1, -1 };
-  bool                        binary_output   = false;
-  bool                        calibrate       = false;
-  jack_nframes_t              rms_window_size = 0;
-  jack_default_audio_sample_t sine_wave_freq  = 0;
+  RmsBounds      rms_bounds      = { -1, -1 };
+  bool           has_rms_min     = false;
+  bool           has_rms_max     = false;
+  bool           binary_output   = false;
+  bool           calibrate       = false;
+  jack_nframes_t rms_window_size = 0;
+  sample_t       sine_wave_freq  = 0;
 
   for (int i = 1; i < argc; ++i) {
     if (EQ(argv[i], "--help") || EQ(argv[i], "-h") || EQ(argv[i], "-?")) {
@@ -555,12 +521,12 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
       }
 
-      long int x = atol(argv[i]);
+      double x = atof(argv[i]);
 
-      // Check for “UINT32_MAX” instead of “INT64_MAX” is intentional
-      if (x < 0 || x > UINT32_MAX) {
+      // “float”’s range must be enough, it’s in decibels after all.
+      if (x < -FLT_MAX || x > FLT_MAX) {
         fprintf( stderr
-               , "Incorrect unsigned integer value “%s” "
+               , "Incorrect floating point value “%s” "
                  "argument provided for “%s”!\n\n"
                , argv[i]
                , argv[i-1]
@@ -570,13 +536,13 @@ int main(int argc, char *argv[])
       }
 
       if (EQ(argv[i-1], "-l") || EQ(argv[i-1], "--lower")) {
-        // Cast to “uint32_t” instead of “int64_t” is intentional
-        rms_bounds.rms_min_bound = (uint32_t)x;
-        LOG("Setting min "RMS_LOG" to %li…", rms_bounds.rms_min_bound);
+        rms_bounds.rms_min_bound = (float)x;
+        has_rms_min = true;
+        LOG("Setting min RMS to %f dB…", rms_bounds.rms_min_bound);
       } else {
-        // Cast to “uint32_t” instead of “int64_t” is intentional
-        rms_bounds.rms_max_bound = (uint32_t)x;
-        LOG("Setting max "RMS_LOG" to %li…", rms_bounds.rms_max_bound);
+        rms_bounds.rms_max_bound = (float)x;
+        has_rms_max = true;
+        LOG("Setting max RMS to %f dB…", rms_bounds.rms_max_bound);
       }
     } else if (EQ(argv[i], "-c") || EQ(argv[i], "--calibrate")) {
       calibrate = true;
@@ -604,7 +570,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
       }
 
-      sine_wave_freq = (jack_default_audio_sample_t)x;
+      sine_wave_freq = (sample_t)x;
       LOG("Setting sine wave frequency to %f Hz…", sine_wave_freq);
     } else if (EQ(argv[i], "-w") || EQ(argv[i], "--rms-window")) {
       if (++i >= argc) {
@@ -637,7 +603,7 @@ int main(int argc, char *argv[])
 
   if (calibrate) {
     fprintf(stderr, "Running in calibration mode…\n");
-  } else if (rms_bounds.rms_min_bound < 0 || rms_bounds.rms_max_bound < 0) {
+  } else if ( ! has_rms_min || ! has_rms_max) {
     fprintf( stderr
            , "RMS bounds were not provided, run with --calibrate "
              "to get the values first!\n\n"
@@ -657,15 +623,12 @@ int main(int argc, char *argv[])
 // Root Mean Square (RMS) calculation.
 // This function isn’t used in the code, it’s inlined where needed.
 // Just useful to see the reference implementation.
-jack_default_audio_sample_t rms
-( jack_default_audio_sample_t *samples_list
-, jack_nframes_t               window_size
-)
+sample_t rms (sample_t *samples_list, jack_nframes_t window_size)
 {
-  jack_default_audio_sample_t sum = 0.0f;
+  sample_t sum = 0.0f;
 
   for (jack_nframes_t i = 0; i < window_size; ++i)
     sum += powf(samples_list[i], 2);
 
-  return (1.0f / (jack_default_audio_sample_t)window_size) * sum;
+  return (1.0f / (sample_t)window_size) * sum;
 }
