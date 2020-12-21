@@ -46,7 +46,7 @@
 #define AMP_TO_DB(amp) (20 * log10(amp))
 #define DB_TO_AMP(dB) (pow(10, (dB / 20))
 
-char jack_client_name[128] = "pidalboard-expression-pedal";
+char jack_client_name[] = "pidalboard-expression-pedal";
 
 typedef jack_default_audio_sample_t sample_t; // shorter name
 typedef struct { sample_t rms_min_bound, rms_max_bound; } RmsBounds; // in dB
