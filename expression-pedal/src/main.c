@@ -46,22 +46,26 @@
 #define AMP_TO_DB(amp) (20 * log10(amp))
 #define DB_TO_AMP(dB) (pow(10, (dB / 20))
 
+// generic-ish hehe
+#define DEFINE_QUEUE(prefix, item_type) \
+  typedef struct prefix ## Node  prefix ## Node; \
+  typedef struct prefix ## Queue prefix ## Queue; \
+  struct prefix ## Node { \
+    item_type      value; \
+    prefix ## Node *next; \
+  }; \
+  struct prefix ## Queue { \
+    prefix ## Node *head; \
+    prefix ## Node *tail; \
+  };
+
 char jack_client_name[] = "pidalboard-expression-pedal";
 
 typedef jack_default_audio_sample_t sample_t; // shorter name
 typedef struct { sample_t rms_min_bound, rms_max_bound; } RmsBounds; // in dB
-typedef struct Node  Node;
-typedef struct Queue Queue;
 
-struct Node {
-  uint8_t value;
-  Node *next;
-};
-
-struct Queue {
-  Node *head;
-  Node *tail;
-};
+DEFINE_QUEUE(Uint8,    uint8_t);
+DEFINE_QUEUE(Decibels, sample_t);
 
 typedef struct {
   jack_nframes_t      sample_rate, buffer_size;
@@ -75,7 +79,8 @@ typedef struct {
 
   pthread_mutex_t     queue_lock;
   pthread_cond_t      queue_cond;
-  Queue               value_changes_queue;
+  Uint8Queue          value_changes_queue;
+  DecibelsQueue       calibration_values_queue; // for calibration mode only
 
   sample_t            sine_wave_freq;
   jack_nframes_t      sine_wave_sample_i;
@@ -106,7 +111,7 @@ void* handle_value_updates(void *arg)
         LOG("Value changes queue is empty.");
       } else {
         uint8_t value = state->value_changes_queue.head->value;
-        Node *tmp_node = state->value_changes_queue.head;
+        Uint8Node *tmp_node = state->value_changes_queue.head;
         state->value_changes_queue.head = state->value_changes_queue.head->next;
 
         if (state->value_changes_queue.head == NULL)
@@ -122,6 +127,44 @@ void* handle_value_updates(void *arg)
         } else {
           printf("New value: %d\n", value);
         }
+
+        // Don’t wait for a next notification yet,
+        // handle whole queue before starting to wait again.
+        pthread_mutex_lock(&state->queue_lock);
+        goto handle_next_queue_item_without_waiting;
+      }
+  }
+}
+
+void* handle_calibrate_value_updates(void *arg)
+{
+  State *state = (State *)arg;
+
+  for (;;) {
+    pthread_mutex_lock(&state->queue_lock);
+    LOG("Waiting for a notification of a new RMS dB value update…");
+    pthread_cond_wait(&state->queue_cond, &state->queue_lock);
+    LOG("Received a notification of a change of the RMS dB value.");
+
+    handle_next_queue_item_without_waiting:
+      if (state->calibration_values_queue.head == NULL) {
+        pthread_mutex_unlock(&state->queue_lock);
+        LOG("RMS dB value changes queue is empty.");
+      } else {
+        sample_t rms_db = state->calibration_values_queue.head->value;
+        DecibelsNode *tmp_node = state->calibration_values_queue.head;
+
+        state->calibration_values_queue.head =
+          state->calibration_values_queue.head->next;
+
+        if (state->calibration_values_queue.head == NULL)
+          state->calibration_values_queue.tail = NULL;
+
+        pthread_mutex_unlock(&state->queue_lock);
+        tmp_node->next = NULL;
+        free(tmp_node);
+
+        fprintf(stderr, "New RMS: %f dB\n", rms_db);
 
         // Don’t wait for a next notification yet,
         // handle whole queue before starting to wait again.
@@ -178,7 +221,7 @@ int jack_process(jack_nframes_t nframes, void *arg)
         ), 0), UINT8_MAX);
 
         if (value != state->last_value) {
-          Node *new_node = malloc(sizeof(Node));
+          Uint8Node *new_node = malloc(sizeof(Uint8Node));
           MALLOC_CHECK(new_node);
           new_node->value = value;
           new_node->next = NULL;
@@ -232,7 +275,22 @@ int jack_process_calibrate(jack_nframes_t nframes, void *arg)
       sample_t rms_db = finalize_rms_db(state->rms_window_size, state->rms_sum);
 
       if (rms_db != state->last_rms_db) {
-        fprintf(stderr, "New RMS: %f dB\n", rms_db);
+        DecibelsNode *new_node = malloc(sizeof(DecibelsNode));
+        MALLOC_CHECK(new_node);
+        new_node->value = rms_db;
+        new_node->next = NULL;
+        pthread_mutex_lock(&state->queue_lock);
+
+        if (state->calibration_values_queue.tail != NULL)
+          state->calibration_values_queue.tail->next = new_node;
+
+        state->calibration_values_queue.tail = new_node;
+
+        if (state->calibration_values_queue.head == NULL) // first value
+          state->calibration_values_queue.head = new_node;
+
+        pthread_cond_signal(&state->queue_cond);
+        pthread_mutex_unlock(&state->queue_lock);
         state->last_rms_db = rms_db;
       }
 
@@ -377,6 +435,8 @@ void null_state(State *state)
 
   state->value_changes_queue.head = NULL;
   state->value_changes_queue.tail = NULL;
+  state->calibration_values_queue.head = NULL;
+  state->calibration_values_queue.tail = NULL;
 
   state->sine_wave_freq                 = 0.0f;
   state->sine_wave_sample_i             = 0;
@@ -444,7 +504,13 @@ void run
 
   LOG("Running a thread for handing value updates queue…");
   pthread_t tid;
-  int err = pthread_create(&tid, NULL, &handle_value_updates, (void *)state);
+
+  int err = pthread_create(
+    &tid,
+    NULL,
+    calibrate ? &handle_calibrate_value_updates : &handle_value_updates,
+    (void *)state
+  );
 
   if (err != 0) ERR("Failed to create a thread: [%s]", strerror(err));
 
